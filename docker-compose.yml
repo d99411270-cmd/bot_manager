@@ -1,0 +1,7 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./secrets/google-service-account.json:/run/secrets/google-service-account.json:ro

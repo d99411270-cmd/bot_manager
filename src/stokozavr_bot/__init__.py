@@ -1,0 +1,1 @@
+"""Stokozavr Telegram bot."""
