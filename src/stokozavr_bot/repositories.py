@@ -14,6 +14,7 @@ class CRMRepository(Protocol):
         self, telegram_id: int, created_at: datetime, user_message: str, assistant_message: str
     ) -> None: ...
     async def get_history(self, telegram_id: int, limit: int = 10) -> list[HistoryEntry]: ...
+    async def list_clients(self) -> list[ClientProfile]: ...
 
 
 class InMemoryCRMRepository:
@@ -38,3 +39,6 @@ class InMemoryCRMRepository:
     async def get_history(self, telegram_id: int, limit: int = 10) -> list[HistoryEntry]:
         rows = [x for x in self.history if x.telegram_id == telegram_id]
         return deepcopy(rows[-limit:])
+
+    async def list_clients(self) -> list[ClientProfile]:
+        return [deepcopy(client) for client in self.clients.values()]

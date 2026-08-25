@@ -83,6 +83,61 @@ async def test_google_sheets_repository_loads_client_with_empty_comment():
 
 
 @pytest.mark.asyncio
+async def test_google_sheets_persists_email_and_skipped_contact():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    client = ClientProfile(
+        telegram_id=7,
+        name="Анна",
+        email="anna@shop.ru",
+        product="груши",
+        volume="5 ящиков",
+        status="уточнение объёма",
+        contact_skipped=False,
+        first_contact_at=now,
+        last_contact_at=now,
+        comment="важный",
+    )
+    await repo.save_client(client)
+    loaded = await repo.get_client(7)
+
+    assert loaded.email == "anna@shop.ru"
+    assert loaded.volume == "5 ящиков"
+    assert loaded.comment == "важный"
+    assert "Почта: anna@shop.ru" in book.sheets["Клиенты"].rows[1][-1]
+
+    client.email = None
+    client.contact_skipped = True
+    await repo.save_client(client)
+    loaded = await repo.get_client(7)
+    assert loaded.email is None
+    assert loaded.contact_skipped is True
+    assert "Без контакта" in book.sheets["Клиенты"].rows[1][-1]
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_stores_surname_separately():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=8,
+            name="Сергей",
+            last_name="Иванов",
+            first_contact_at=now,
+            last_contact_at=now,
+        )
+    )
+    loaded = await repo.get_client(8)
+    assert loaded.name == "Сергей"
+    assert loaded.last_name == "Иванов"
+    assert book.sheets["Клиенты"].rows[1][2] == "Сергей Иванов"
+    assert "Фамилия: Иванов" in book.sheets["Клиенты"].rows[1][-1]
+
+
+@pytest.mark.asyncio
 async def test_google_sheets_repository_appends_and_limits_history():
     book = FakeBook()
     repo = GoogleSheetsCRMRepository(book)

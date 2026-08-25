@@ -125,6 +125,72 @@ async def test_unsafe_price_or_stock_claim_is_replaced(now, unsafe):
 
 
 @pytest.mark.asyncio
+async def test_catalog_price_reply_is_sent(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=1,
+            name="Пётр",
+            phone="+799****0001",
+            product="фрукты",
+            volume="10 ящиков",
+            status="квалифицирован",
+        )
+    )
+    reply = "Яблоки 850 ₽ за ящик, груши 1 100 ₽ за ящик. Какой объём нужен?"
+    service = ConversationService(repo, FakeAI([AiTurn(reply=reply)]), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(1, None, "Сколько стоят груши и яблоки?"))
+
+    assert "уточню этот вопрос" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_qualitative_stock_reply_is_sent(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=1,
+            name="Сергей",
+            phone="+799****0001",
+            product="овощи",
+            status="уточнение объёма",
+        )
+    )
+    reply = "Картофель, морковь и лук — много, огурцов мало. Какой объём нужен?"
+    service = ConversationService(repo, FakeAI([AiTurn(reply=reply)]), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(1, None, "Какие овощи сейчас в наличии?"))
+
+    assert "уточню этот вопрос" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_exact_stock_count_is_blocked(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=1,
+            name="Сергей",
+            phone="+799****0001",
+            product="овощи",
+            volume="10 сеток",
+            status="квалифицирован",
+        )
+    )
+    service = ConversationService(
+        repo,
+        FakeAI([AiTurn(reply="Картофеля 40 сеток на складе.")]),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(1, None, "Сколько картофеля есть?"))
+
+    assert "40 сеток" not in result.text
+    assert "уточню этот вопрос" in result.text.lower() or "750" in result.text
+
+
+@pytest.mark.asyncio
 async def test_ai_gets_profile_and_recent_history_only(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

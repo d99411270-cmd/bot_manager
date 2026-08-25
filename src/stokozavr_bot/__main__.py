@@ -1,11 +1,13 @@
 import asyncio
 import logging
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from .config import Settings
 from .deepseek import DeepSeekClient
+from .followup_worker import followup_loop
 from .google_sheets import GoogleSheetsCRMRepository
 from .service import ConversationService
 from .telegram import create_router
@@ -32,7 +34,11 @@ async def main() -> None:
         timeout=settings.deepseek_timeout_seconds,
         max_tokens=settings.deepseek_max_tokens,
     )
-    service = ConversationService(repository, ai)
+    service = ConversationService(
+        repository,
+        ai,
+        followup_delay=timedelta(seconds=settings.followup_delay_seconds),
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(
         create_router(
@@ -42,9 +48,22 @@ async def main() -> None:
         )
     )
     bot = build_bot(settings)
+
+    async def send_followup(telegram_id: int, text: str) -> None:
+        await bot.send_message(telegram_id, text)
+
+    worker = asyncio.create_task(
+        followup_loop(
+            repository,
+            send_followup,
+            interval_seconds=settings.followup_poll_seconds,
+            planner=ai.plan_followup,
+        )
+    )
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        worker.cancel()
         await bot.session.close()
 
 

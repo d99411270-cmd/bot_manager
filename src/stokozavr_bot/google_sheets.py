@@ -66,37 +66,32 @@ class GoogleSheetsCRMRepository:
     def _get_client_sync(self, telegram_id: int) -> ClientProfile | None:
         for row in self.clients_sheet.get_all_records():
             if str(row.get("telegram_id")) == str(telegram_id):
-                comment = _text(row.get("комментарии")) or ""
-                volume = None
-                if comment.startswith("Объём: "):
-                    volume = comment.removeprefix("Объём: ").split(" | ", 1)[0]
-                return ClientProfile(
-                    telegram_id=telegram_id,
-                    username=_text(row.get("username")),
-                    name=_text(row.get("имя клиента")),
-                    phone=_text(row.get("телефон")),
-                    product=_text(row.get("интересующая продукция")),
-                    volume=volume,
-                    status=_text(row.get("статус клиента")) or "новый",
-                    first_contact_at=_date(row.get("дата первого обращения")),
-                    last_contact_at=_date(row.get("дата последнего обращения")),
-                    comment=comment,
-                )
+                return _client_from_row(row, telegram_id)
         return None
+
+    async def list_clients(self) -> list[ClientProfile]:
+        return await asyncio.to_thread(self._list_clients_sync)
+
+    def _list_clients_sync(self) -> list[ClientProfile]:
+        result: list[ClientProfile] = []
+        for row in self.clients_sheet.get_all_records():
+            raw_id = row.get("telegram_id")
+            try:
+                telegram_id = int(str(raw_id))
+            except (TypeError, ValueError):
+                continue
+            result.append(_client_from_row(row, telegram_id))
+        return result
 
     async def save_client(self, client: ClientProfile) -> None:
         await asyncio.to_thread(self._save_client_sync, client)
 
     def _save_client_sync(self, client: ClientProfile) -> None:
-        comment = client.comment or ""
-        if client.volume:
-            volume_note = f"Объём: {client.volume}"
-            if not comment.startswith(volume_note):
-                comment = volume_note + (f" | {comment}" if comment else "")
+        comment = _build_comment(client)
         values = [
             client.telegram_id,
             client.username or "",
-            client.name or "",
+            _display_name(client),
             client.phone or "",
             client.product or "",
             client.status,
@@ -137,6 +132,90 @@ class GoogleSheetsCRMRepository:
         return result[-limit:]
 
 
+def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
+    comment = _text(row.get("комментарии")) or ""
+    volume, email, skipped, last_name, extra = _parse_comment(comment)
+    due, sent, extra = _split_followup(extra)
+    return ClientProfile(
+        telegram_id=telegram_id,
+        username=_text(row.get("username")),
+        name=_first_name(_text(row.get("имя клиента"))),
+        last_name=last_name or _last_name_from_cell(_text(row.get("имя клиента"))),
+        phone=_text(row.get("телефон")),
+        email=email,
+        product=_text(row.get("интересующая продукция")),
+        volume=volume,
+        status=_text(row.get("статус клиента")) or "новый",
+        first_contact_at=_date(row.get("дата первого обращения")),
+        last_contact_at=_date(row.get("дата последнего обращения")),
+        comment=extra,
+        contact_skipped=skipped,
+        followup_due_at=due,
+        followup_sent=sent,
+        needs_human="Нужен менеджер" in extra,
+    )
+
+
+def _parse_comment(comment: str) -> tuple[str | None, str | None, bool, str | None, str]:
+    volume = None
+    email = None
+    skipped = False
+    last_name = None
+    extras: list[str] = []
+    for part in [item.strip() for item in comment.split(" | ") if item.strip()]:
+        if part.startswith("Объём: "):
+            volume = part.removeprefix("Объём: ")
+        elif part.startswith("Почта: "):
+            email = part.removeprefix("Почта: ")
+        elif part.startswith("Фамилия: "):
+            last_name = part.removeprefix("Фамилия: ")
+        elif part == "Без контакта":
+            skipped = True
+        else:
+            extras.append(part)
+    return volume, email, skipped, last_name, " | ".join(extras)
+
+
+def _split_followup(extra: str) -> tuple[datetime | None, bool, str]:
+    due = None
+    sent = False
+    kept: list[str] = []
+    for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        if part.startswith("Напомнить: "):
+            due = _date(part.removeprefix("Напомнить: "))
+        elif part == "Напоминание отправлено":
+            sent = True
+        else:
+            kept.append(part)
+    return due, sent, " | ".join(kept)
+
+
+def _build_comment(client: ClientProfile) -> str:
+    parts: list[str] = []
+    if client.volume:
+        parts.append(f"Объём: {client.volume}")
+    if client.email:
+        parts.append(f"Почта: {client.email}")
+    if client.contact_skipped:
+        parts.append("Без контакта")
+    if client.followup_due_at:
+        parts.append(f"Напомнить: {client.followup_due_at.isoformat()}")
+    if client.followup_sent:
+        parts.append("Напоминание отправлено")
+    if client.needs_human:
+        parts.append("Нужен менеджер")
+    if client.original_interests:
+        parts.append(f"Исходный интерес: {', '.join(client.original_interests)}")
+    if client.current_interest:
+        parts.append(f"Текущий интерес: {client.current_interest}")
+    extra = _split_followup(_parse_comment(client.comment or "")[4])[2]
+    if client.last_name:
+        parts.append(f"Фамилия: {client.last_name}")
+    if extra:
+        parts.append(extra)
+    return " | ".join(parts)
+
+
 def _format_date(value: datetime | None) -> str:
     return value.isoformat() if value else ""
 
@@ -151,3 +230,20 @@ def _date(value: object) -> datetime | None:
 def _text(value: object) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _display_name(client: ClientProfile) -> str:
+    return " ".join(part for part in (client.name, client.last_name) if part)
+
+
+def _first_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.split()[0]
+
+
+def _last_name_from_cell(value: str | None) -> str | None:
+    if not value:
+        return None
+    parts = value.split()
+    return " ".join(parts[1:]) or None

@@ -9,13 +9,15 @@ class Settings(BaseSettings):
     telegram_proxy_url: str = Field("", alias="TELEGRAM_PROXY_URL")
     deepseek_api_key: str = Field(alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field("https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
-    deepseek_model: str = Field("deepseek-chat", alias="DEEPSEEK_MODEL")
+    deepseek_model: str = Field("deepseek-v4-flash", alias="DEEPSEEK_MODEL")
     google_spreadsheet_id: str = Field(alias="GOOGLE_SPREADSHEET_ID")
     google_service_account_file: str | None = Field(None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
     google_service_account_json: str | None = Field(None, alias="GOOGLE_SERVICE_ACCOUNT_JSON")
     deepseek_timeout_seconds: float = Field(20.0, alias="DEEPSEEK_TIMEOUT_SECONDS", gt=0)
-    deepseek_max_tokens: int = Field(350, alias="DEEPSEEK_MAX_TOKENS", ge=50, le=2000)
+    deepseek_max_tokens: int = Field(800, alias="DEEPSEEK_MAX_TOKENS", ge=50, le=2000)
     reply_delay_probability: float = Field(0.7, alias="REPLY_DELAY_PROBABILITY", ge=0, le=1)
+    followup_delay_seconds: int = Field(3600, alias="FOLLOWUP_DELAY_SECONDS", ge=60, le=86400)
+    followup_poll_seconds: int = Field(60, alias="FOLLOWUP_POLL_SECONDS", ge=15, le=3600)
 
     @model_validator(mode="after")
     def validate_settings(self):

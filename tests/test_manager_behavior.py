@@ -9,6 +9,8 @@ from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeA
 from stokozavr_bot.prompt_bundle import load_prompt_bundle
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import (
+    FALLBACK,
+    PRODUCT_ASSORTMENT,
     PRODUCT_QUESTION,
     START_TEXT,
     ConversationService,
@@ -87,9 +89,8 @@ async def test_phone_refusal_uses_new_benefit_wording(now):
 
     assert saved.name == "Анна"
     assert saved.phone is None
-    assert "закрепить за вами информацию" in result.text.lower()
-    assert "быстро связаться по вопросам заказа" in result.text.lower()
-    assert "номер нужен для связи" not in result.text.lower()
+    assert saved.status == "ожидает почту"
+    assert "почт" in result.text.lower()
     assert result.request_contact is False
     assert result.text.count("?") <= 1
 
@@ -108,11 +109,8 @@ async def test_assortment_question_does_not_repeat_product_question(now, questio
     result = await service.handle(IncomingMessage(4, None, question))
 
     assert PRODUCT_QUESTION not in result.text
-    assert "бакалея" in result.text.lower()
-    assert "напитки" in result.text.lower()
-    assert "консервация" in result.text.lower()
-    assert "какая категория вам интересна" in result.text.lower()
-    assert result.text.count("?") == 1
+    assert PRODUCT_ASSORTMENT not in result.text
+    assert result.text == FALLBACK
     assert (await repo.get_client(4)).product is None
 
 
@@ -132,9 +130,8 @@ async def test_price_is_not_invented_before_volume(now):
 
     result = await service.handle(IncomingMessage(5, None, "Сколько стоит?"))
 
-    assert result.text.startswith("Актуальную цену и наличие я уточню.")
+    assert result.text == FALLBACK
     assert "руб" not in result.text.lower()
-    assert "объём" in result.text.lower()
     assert (await repo.get_client(5)).volume is None
 
 
@@ -357,3 +354,201 @@ def test_returning_greeting_helper_mentions_name_and_product():
     assert "масло" in text.lower()
     assert text.count("?") == 1
     assert "как я могу к вам обращаться" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_assortment_question_without_phone_uses_ai_not_form(now):
+    repo = InMemoryCRMRepository()
+    ai_reply = (
+        "Работаем оптом: бакалея, напитки, консервация и другие продукты. "
+        "Какая категория вам нужна?"
+    )
+    service = ConversationService(
+        repo,
+        SemanticAI([analysis("question")], [AiTurn(reply=ai_reply)]),
+        clock=lambda: now,
+    )
+
+    start = await service.handle(IncomingMessage(100, None, "/start"))
+    result = await service.handle(IncomingMessage(100, None, "а какая у вас есть?"))
+    saved = await repo.get_client(100)
+
+    assert start.text == START_TEXT
+    assert result.text == ai_reply
+    assert PRODUCT_QUESTION not in result.text
+    assert "как я могу к вам обращаться" not in result.text.lower()
+    assert "номер телефона" not in result.text.lower()
+    assert result.text.count("?") <= 1
+    assert saved.phone is None
+    assert saved.product is None
+    assert len(service.ai.respond_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_price_question_without_phone_does_not_invent_price(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            [analysis("question")],
+            [AiTurn(reply="Оливки по 120 рублей, всегда в наличии.")],
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(101, None, "Сколько стоит?"))
+
+    assert "руб" not in result.text.lower()
+    assert "120" not in result.text
+    assert result.text == FALLBACK
+    assert result.request_contact is False
+
+
+@pytest.mark.asyncio
+async def test_phone_refusal_can_use_valid_ai_reply(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=102, name="Анна", status="ожидает телефон"))
+    ai_reply = "Понимаю. Тогда оставьте почту, чтобы закрепить заявку."
+    service = ConversationService(
+        repo,
+        SemanticAI([analysis("refusal")], [AiTurn(reply=ai_reply)]),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(102, None, "Телефон не дам"))
+    saved = await repo.get_client(102)
+
+    assert result.text == ai_reply
+    assert saved.phone is None
+    assert saved.status == "ожидает почту"
+    assert result.request_contact is False
+    assert result.text.count("?") <= 1
+    assert len(service.ai.respond_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_ai_saves_new_product_and_volume(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=103,
+            name="Анна",
+            phone="+79991234567",
+            product="оливки",
+            volume="10 коробок",
+            status="квалифицирован",
+        )
+    )
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            turns=[AiTurn(reply="Зафиксировал масло, 5 тонн.", product="масло", volume="5 тонн")]
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(103, None, "На самом деле масло, 5 тонн"))
+    saved = await repo.get_client(103)
+
+    assert result.text == "Зафиксировал масло, 5 тонн."
+    assert saved.product == "масло"
+    assert saved.volume == "5 тонн"
+
+
+@pytest.mark.asyncio
+async def test_who_are_you_without_phone_uses_ai_reply(now):
+    repo = InMemoryCRMRepository()
+    ai_reply = "Я Иван, персональный менеджер оптового магазина Стокозавр. Как к вам обращаться?"
+    service = ConversationService(
+        repo,
+        SemanticAI([analysis("question")], [AiTurn(reply=ai_reply)]),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(104, None, "А вы кто?"))
+
+    assert result.text == ai_reply
+    assert PRODUCT_QUESTION not in result.text
+    assert "иван" in result.text.lower()
+    assert result.text.count("?") <= 1
+
+
+@pytest.mark.asyncio
+async def test_fruits_question_without_phone_does_not_contain_product_question(now):
+    repo = InMemoryCRMRepository()
+    ai_reply = "По фруктам: яблоки, бананы, апельсины и груши. Какой объём смотрите?"
+    service = ConversationService(
+        repo,
+        SemanticAI([analysis("question")], [AiTurn(reply=ai_reply)]),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(200, None, "какие фрукты есть?"))
+    saved = await repo.get_client(200)
+
+    assert result.text == ai_reply
+    assert PRODUCT_QUESTION not in result.text
+    assert PRODUCT_ASSORTMENT not in result.text
+    assert "номер телефона" not in result.text.lower()
+    assert saved.phone is None
+    assert saved.product is None
+    assert len(service.ai.respond_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_name_capture_does_not_interrupt_product_answer(now):
+    repo = InMemoryCRMRepository()
+    ai_reply = "По фруктам есть яблоки и бананы. Какой объём смотрите?"
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            [analysis("provide_data", name="Анна", product="фрукты")],
+            [AiTurn(reply=ai_reply)],
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(201, None, "Анна, какие фрукты есть?"))
+    saved = await repo.get_client(201)
+
+    assert result.text == ai_reply
+    assert saved.name == "Анна"
+    assert saved.phone is None
+    assert saved.product is None
+    assert PRODUCT_QUESTION not in result.text
+    assert "номер телефона" not in result.text.lower()
+    assert len(service.ai.respond_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_product_question_fallback_is_clarify_not_form(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI([analysis("question")]), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(202, None, "какие фрукты есть?"))
+
+    assert result.text == FALLBACK
+    assert PRODUCT_QUESTION not in result.text
+    assert PRODUCT_ASSORTMENT not in result.text
+    assert "какая категория вам интересна" not in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_price_question_does_not_invent_price_or_ask_form(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            [analysis("question")],
+            [AiTurn(reply="Оливки по 120 рублей, всегда в наличии.")],
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(203, None, "Сколько стоит?"))
+
+    assert result.text == FALLBACK
+    assert "руб" not in result.text.lower()
+    assert "120" not in result.text
+    assert PRODUCT_QUESTION not in result.text
+    assert result.request_contact is False

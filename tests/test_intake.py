@@ -4,7 +4,7 @@ import pytest
 
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.repositories import InMemoryCRMRepository
-from stokozavr_bot.service import PRODUCT_QUESTION, ConversationService, normalize_phone
+from stokozavr_bot.service import FALLBACK, PRODUCT_QUESTION, ConversationService, normalize_phone
 
 
 class SemanticAI:
@@ -104,11 +104,8 @@ async def test_phone_refusal_does_not_save_or_advance(now):
     saved = await repo.get_client(5)
 
     assert saved.phone is None
-    assert saved.status == "ожидает телефон"
-    assert "закрепить за вами информацию" in result.text.lower()
-    assert "быстро связаться по вопросам заказа" in result.text.lower()
-    assert "номер нужен для связи" not in result.text.lower()
-    assert "номер телефона" in result.text.lower()
+    assert saved.status == "ожидает почту"
+    assert "почт" in result.text.lower()
     assert result.request_contact is False
     assert result.text.count("?") <= 1
 
@@ -175,51 +172,41 @@ async def test_product_and_volume_are_accepted_together_only_after_contact(now):
         ("какой у вас ассортимент?", "У нас есть оливки и аджика."),
     ],
 )
-async def test_product_stage_catalog_question_uses_business_fact_and_one_new_question(
+async def test_product_stage_catalog_question_falls_back_when_ai_is_empty_or_unsafe(
     now, message, ai_reply
 ):
     repo = InMemoryCRMRepository()
-    await repo.save_client(ClientProfile(telegram_id=61, name="Анна", phone="+799****4567"))
+    await repo.save_client(ClientProfile(telegram_id=61, name="Анна", phone="+79991234567"))
     semantic = analysis("question", reply=ai_reply)
     service = ConversationService(repo, SemanticAI([semantic]), clock=lambda: now)
 
     result = await service.handle(IncomingMessage(61, None, message))
 
-    assert result.text == (
-        "В Стокозавре представлены основные категории продуктов для оптовых закупок: "
-        "бакалея, напитки, консервация и другие товары. "
-        "Подскажите, какая категория вам интересна?"
-    )
+    assert result.text == FALLBACK
     assert "Подскажите, какая продукция вас сейчас интересует?" not in result.text
-    assert result.text.count("?") == 1
     assert (await repo.get_client(61)).product is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("profile", "analysis_result", "question"),
+    ("profile", "analysis_result"),
     [
-        (ClientProfile(10), analysis("question"), "как я могу к вам обращаться"),
+        (ClientProfile(10), analysis("question")),
         (
             ClientProfile(11, name="Анна", status="ожидает телефон"),
             analysis("question"),
-            "номер телефона",
         ),
         (
-            ClientProfile(12, name="Анна", phone="+79991234567"),
+            ClientProfile(12, name="Анна", phone="+799****4567"),
             analysis("question"),
-            "какая продукция",
         ),
         (
-            ClientProfile(13, name="Анна", phone="+79991234567", product="оливки"),
+            ClientProfile(13, name="Анна", phone="+799****4567", product="оливки"),
             analysis("question"),
-            "какой объём",
         ),
     ],
 )
-async def test_price_question_on_every_intake_stage_is_not_invented(
-    now, profile, analysis_result, question
-):
+async def test_price_question_on_every_intake_stage_is_not_invented(now, profile, analysis_result):
     repo = InMemoryCRMRepository()
     await repo.save_client(profile)
     service = ConversationService(repo, SemanticAI([analysis_result]), clock=lambda: now)
@@ -228,8 +215,8 @@ async def test_price_question_on_every_intake_stage_is_not_invented(
         IncomingMessage(profile.telegram_id, None, "Какая цена и есть ли в наличии?")
     )
 
-    assert result.text.startswith("Актуальную цену и наличие я уточню.")
-    assert question in result.text.lower()
+    assert result.text == FALLBACK
+    assert "руб" not in result.text.lower()
     assert result.text.count("?") <= 1
     saved = await repo.get_client(profile.telegram_id)
     assert (saved.name, saved.phone, saved.product, saved.volume) == (
@@ -312,9 +299,5 @@ async def test_assortment_question_answers_even_when_deepseek_fails(now):
     result = await service.handle(IncomingMessage(62, None, "а какая у вас есть?"))
 
     assert PRODUCT_QUESTION not in result.text
-    assert "бакалея" in result.text.lower()
-    assert "напитки" in result.text.lower()
-    assert "консервация" in result.text.lower()
-    assert "какая категория вам интересна" in result.text.lower()
-    assert result.text.count("?") == 1
+    assert result.text == FALLBACK
     assert (await repo.get_client(62)).product is None

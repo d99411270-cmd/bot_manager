@@ -28,6 +28,7 @@ packages = ["src/stokozavr_bot"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "prompts" = "stokozavr_bot/prompts"
+"catalog" = "stokozavr_bot/catalog"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

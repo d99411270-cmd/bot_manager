@@ -1,0 +1,155 @@
+from pathlib import Path
+
+from stokozavr_bot.product_catalog import (
+    _all_records,
+    catalog_has_stock_status,
+    listed_price_amounts,
+    listed_stock_amounts,
+    search,
+)
+
+REPO_CATALOG = Path(__file__).resolve().parents[1] / "catalog"
+
+
+def test_search_fruits_returns_apples_and_bananas():
+    result = search("фрукты")
+
+    lowered = result.lower()
+    assert "фрукты" in lowered
+    assert "fru-apple-001" in lowered
+    assert "780" not in lowered
+
+
+def test_search_apple_juice_returns_grounded_product_details():
+    result = search("яблочный сок")
+
+    lowered = result.lower()
+    assert "сок яблочный" in lowered
+    assert "северная капля" in lowered
+    assert "sku: sok-apple-001" in lowered
+    assert "6 x 1 л" in lowered
+    assert "890 ₽" in result
+    assert "много" in lowered
+    assert "дата обновления: 2026-08-25" in lowered
+
+
+def test_search_apple_juice_cheaper_returns_one_quiet_alternative():
+    result = search("яблочный сок подешевле")
+
+    lowered = result.lower()
+    assert "северная капля" in lowered
+    assert "росинка поля" in lowered
+    assert "990 ₽" in result
+    assert lowered.count("производитель:") == 2
+
+
+def test_regular_apple_juice_search_does_not_dump_competitors():
+    result = search("яблочный сок")
+
+    assert "росинка поля" not in result.lower()
+    assert "990 ₽" not in result
+
+
+def test_search_competitor_is_scoped_to_matching_product():
+    result = search("вода подешевле")
+
+    assert "росинка поля" not in result.lower()
+    assert "водный круг" in result.lower()
+
+
+def test_empty_search_lists_categories_from_headings():
+    result = search("")
+
+    lowered = result.lower()
+    assert "фрукты" in lowered
+    assert "бакалея" in lowered
+    assert "напитки" in lowered
+    assert "консервац" in lowered
+    assert "макарон" in lowered
+    assert "масло" in lowered
+    assert "яблок" not in lowered
+
+
+def test_catalog_prefers_env_directory(tmp_path, monkeypatch):
+    (tmp_path / "ovoshchi.md").write_text("# Овощи\n\n- Морковь\n", encoding="utf-8")
+    monkeypatch.setenv("STOKOZAVR_CATALOG_DIR", str(tmp_path))
+
+    found = search("овощи")
+    listing = search("")
+
+    assert "подтверждённых позиций" in found.lower()
+    assert "овощи" in listing.lower()
+    assert "яблок" not in found.lower()
+
+
+def test_unknown_category_is_honest_and_lists_what_exists():
+    result = search("молоко")
+
+    lowered = result.lower()
+    assert "не" in lowered
+    assert "фрукты" in lowered or "бакалея" in lowered
+    assert "яблок" not in lowered
+
+
+def test_pyproject_force_includes_catalog_in_wheel():
+    text = (
+        Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert "force-include" in text
+    assert '"catalog"' in text or "'catalog'" in text
+    assert "stokozavr_bot/catalog" in text
+
+
+def test_listed_price_amounts_include_fruit_prices():
+    amounts = listed_price_amounts()
+
+    assert {"890", "990", "720", "810", "300", "360"}.issubset(amounts)
+
+
+def test_listed_stock_amounts_are_internal_only():
+    amounts = listed_stock_amounts()
+
+    assert amounts == set()
+    assert catalog_has_stock_status() is True
+
+
+def test_local_catalog_has_exactly_30_primary_and_30_scoped_competitors():
+    records = _all_records()
+    primary = [record for record in records if not record.is_competitor]
+    competitors = [record for record in records if record.is_competitor]
+
+    assert len(primary) == 30
+    assert len(competitors) == 30
+    assert len({record.sku for record in records}) == 60
+    assert {record.category for record in primary} == {
+        "напитки", "овощи", "фрукты", "бакалея", "макароны", "масло", "консервация"
+    }
+    primary_by_sku = {record.sku: record for record in primary}
+    for competitor in competitors:
+        source = primary_by_sku[competitor.for_sku]
+        assert competitor.category == source.category
+        assert competitor.subcategory == source.subcategory
+        assert competitor.packaging == source.packaging
+        assert int(competitor.price.split()[0]) > int(source.price.split()[0])
+
+
+def test_every_primary_product_is_searchable_without_competitor_leakage():
+    records = [record for record in _all_records() if not record.is_competitor]
+
+    for record in records:
+        result = search(record.subcategory)
+        assert record.sku in result
+        assert f"{record.sku}-ALT" not in result
+        competitor = next(item for item in _all_records() if item.for_sku == record.sku)
+        assert competitor.sku not in result
+
+
+def test_comparison_returns_only_matching_primary_and_competitor_pair():
+    result = search("лимонад цитрусовый сравнить")
+
+    assert "LIM-CITRUS-001" in result
+    assert "LIM-CITRUS-ALT-001" in result
+    assert result.lower().count("производитель:") == 2
+    assert "SOK-APPLE-001" not in result
+    assert "SOK-APPLE-ALT-001" not in result

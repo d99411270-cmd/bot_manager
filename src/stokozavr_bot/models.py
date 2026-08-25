@@ -10,13 +10,23 @@ class ClientProfile:
     telegram_id: int
     username: str | None = None
     name: str | None = None
+    last_name: str | None = None
     phone: str | None = None
+    email: str | None = None
     product: str | None = None
     volume: str | None = None
     status: str = "новый"
     first_contact_at: datetime | None = None
     last_contact_at: datetime | None = None
     comment: str | None = None
+    contact_skipped: bool = False
+    followup_due_at: datetime | None = None
+    followup_sent: bool = False
+    original_interests: list[str] | None = None
+    current_interest: str | None = None
+    needs_human: bool = False
+    competitor_mentions: int = 0
+    competitor_last_reply: bool = False
 
 
 @dataclass(slots=True)
@@ -57,4 +67,10 @@ class IntakeAnalysis:
     phone: str | None = None
     product: str | None = None
     volume: str | None = None
+    reply: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class FollowupPlan:
+    appropriate: bool
     reply: str | None = None

@@ -22,6 +22,13 @@ def test_telegram_proxy_url_is_empty_by_default():
     assert settings.telegram_proxy_url == ""
 
 
+def test_deepseek_defaults_are_v4_flash_and_800_tokens():
+    settings = Settings(**settings_kwargs())
+
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_max_tokens == 800
+
+
 def test_build_bot_uses_proxy_session_when_telegram_proxy_url_is_set():
     proxy_url = "socks5://127.0.0.1:10808"
     settings = Settings(**settings_kwargs(TELEGRAM_PROXY_URL=proxy_url))
