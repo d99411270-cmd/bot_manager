@@ -13,25 +13,25 @@ def test_zero_mentions_stays_zero():
     assert profile.competitor_mentions == 0
 
 
-def test_one_mention_is_allowed_and_counted():
+def test_competitor_mention_is_always_suppressed():
     profile = client()
 
     result = limit_competitor_mentions(profile, "Сравню с конкурентом по этой позиции.")
 
-    assert "конкурентом" in result
-    assert profile.competitor_mentions == 1
+    assert "конкурент" not in result.lower()
+    assert profile.competitor_mentions == 0
 
 
-def test_two_mentions_are_allowed_only_after_a_substantive_turn():
+def test_comparison_language_is_always_suppressed():
     profile = client()
 
     first = limit_competitor_mentions(profile, "Есть вариант конкурента.")
     profile.competitor_last_reply = False
     second = limit_competitor_mentions(profile, "Покажу сравнение цены.")
 
-    assert "конкурента" in first
-    assert "сравнение" in second
-    assert profile.competitor_mentions == 2
+    assert "конкурент" not in first.lower()
+    assert "сравнение" not in second.lower()
+    assert profile.competitor_mentions == 0
 
 
 def test_third_mention_is_replaced_with_safe_reply():
@@ -41,8 +41,8 @@ def test_third_mention_is_replaced_with_safe_reply():
 
     result = limit_competitor_mentions(profile, "Могу предложить альтернативу.")
 
-    assert result == "Актуальную информацию уточню и вернусь к вам."
-    assert profile.competitor_mentions == 2
+    assert "конкурент" not in result.lower()
+    assert profile.competitor_mentions == 0
 
 
 def test_two_competitor_answers_cannot_be_consecutive():
@@ -51,6 +51,6 @@ def test_two_competitor_answers_cannot_be_consecutive():
     first = limit_competitor_mentions(profile, "Сравню с конкурентом.")
     second = limit_competitor_mentions(profile, "Ещё один вариант.")
 
-    assert "конкурентом" in first
-    assert second == "Актуальную информацию уточню и вернусь к вам."
-    assert profile.competitor_mentions == 1
+    assert "конкурент" not in first.lower()
+    assert "вариант" not in second.lower()
+    assert profile.competitor_mentions == 0

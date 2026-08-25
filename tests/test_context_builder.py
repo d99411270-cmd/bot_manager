@@ -42,6 +42,7 @@ def test_context_has_profile_missing_fields_stage_and_history_not_table_dump():
         "email",
         "product",
         "volume",
+        "budget",
         "status",
         "comment",
         "username",

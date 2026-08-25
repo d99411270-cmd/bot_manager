@@ -26,8 +26,7 @@ SYSTEM_PROMPT = (
 Без результата search_catalog не называй конкретные позиции.
 Цифру остатка из каталога клиенту не называй никогда. По статусу говори только: много, мало, нет в наличии.
 Цены называй только если они есть в результате search_catalog.
-Конкурентные варианты из результата называй только если клиент просит «подешевле», «есть варианты» или
-«сравнить», либо основной товар недоступен; в обычном ответе не перечисляй их и не навязывай.
+Конкурентные записи каталога полностью игнорируй: не перечисляй их и не упоминай сравнение или альтернативы.
 Единственная подтверждённая акция: заказ от 50 000 ₽ — доставка по Пензе бесплатная. Другие акции и доставку не выдумывай.
 После цены веди к сделке: устраивает ли, когда забрать или нужна ли доставка, и напомни акцию.
 Если клиент готов покупать — нужен созвон. Нет номера: настаивай, что без звонка заказ не оформить. Номер есть: спроси удобное время.
@@ -128,7 +127,11 @@ class DeepSeekClient:
         self._catalog_search = catalog_search or search_catalog
 
     async def respond(
-        self, profile: ClientProfile, history: list[HistoryEntry], message: str
+        self,
+        profile: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        catalog_result: str | None = None,
     ) -> AiTurn:
         messages: list[dict[str, object]] = [
             {"role": "system", "content": compose_system_prompt(SYSTEM_PROMPT)}
@@ -140,6 +143,13 @@ class DeepSeekClient:
                 + json.dumps(build_model_context(profile, history), ensure_ascii=False),
             }
         )
+        if catalog_result is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Детерминированный результат поиска по каталогу:\n" + catalog_result,
+                }
+            )
         for row in history:
             messages.extend(
                 [
@@ -191,6 +201,46 @@ class DeepSeekClient:
                 needs_human=data["needs_human"],
             )
         raise ValueError("DeepSeek: слишком много вызовов инструментов")
+
+    async def respond_with_catalog(
+        self,
+        profile: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        catalog_result: str,
+    ) -> AiTurn:
+        return await self.respond(profile, history, message, catalog_result=catalog_result)
+
+    async def repair_response(
+        self,
+        profile: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        reason: str,
+        catalog_result: str,
+    ) -> AiTurn:
+        messages: list[dict[str, object]] = [
+            {
+                "role": "system",
+                "content": compose_system_prompt(
+                    "Ты исправляешь неудачный ответ менеджера. Ответь по существу на исходный вопрос "
+                    "клиента, используя только результат каталога ниже. Не выдумывай цены, наличие, "
+                    "товары или условия. Максимум один вопрос. Верни только JSON: "
+                    '{"reply": str, "product": str|null, "volume": str|null, "needs_human": bool}.'
+                ),
+            },
+            {"role": "system", "content": "Причина отбраковки основного ответа: " + reason},
+            {"role": "system", "content": "Результат search_catalog:\n" + catalog_result},
+            {"role": "user", "content": message},
+        ]
+        data = _coerce_sales_result(_message_text(await self._request_message(messages)))
+        _validate_result(data)
+        return AiTurn(
+            reply=data["reply"].strip(),
+            product=data["product"].strip() if data["product"] else None,
+            volume=data["volume"].strip() if data["volume"] else None,
+            needs_human=data["needs_human"],
+        )
 
     async def analyze_intake(
         self, profile: ClientProfile, history: list[HistoryEntry], message: str

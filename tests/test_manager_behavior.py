@@ -527,7 +527,8 @@ async def test_product_question_fallback_is_clarify_not_form(now):
 
     result = await service.handle(IncomingMessage(202, None, "какие фрукты есть?"))
 
-    assert result.text == FALLBACK
+    assert result.text != FALLBACK
+    assert "яблоки сезонные" in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert PRODUCT_ASSORTMENT not in result.text
     assert "какая категория вам интересна" not in result.text.lower()

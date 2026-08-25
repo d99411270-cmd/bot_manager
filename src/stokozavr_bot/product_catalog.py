@@ -153,7 +153,7 @@ def search(query: str) -> str:
     if not cleaned:
         return _category_listing(files)
     records = _all_records()
-    wants_alternative = bool(re.search(r"подешев|вариант|сравн|конкур", cleaned))
+
     tokens = [
         token
         for token in re.split(r"\s+", cleaned)
@@ -169,14 +169,7 @@ def search(query: str) -> str:
 
     primary = [record for record in records if not record.is_competitor and matches(record)]
     matched = primary
-    show_alternatives = wants_alternative or any(
-        "нет" in record.availability.lower() for record in primary
-    )
-    if show_alternatives and primary:
-        primary_skus = {record.sku for record in primary}
-        matched.extend(
-            record for record in records if record.is_competitor and record.for_sku in primary_skus
-        )
+
     if not matched:
         return f"Подтверждённых позиций по запросу «{query.strip()}» нет.\n\n{_category_listing(files)}"
     return "\n".join(
@@ -206,8 +199,44 @@ def catalog_price_lines(query: str) -> list[str]:
     return [line for line in result.splitlines() if "Цена:" in line]
 
 
+def grounded_search_reply(
+    result: str, name: str | None = None, previous_reply: str | None = None
+) -> str | None:
+    """Format confirmed primary catalog lines without exposing internal SKU/date fields."""
+    lines = []
+    for raw_line in result.splitlines():
+        if "SKU:" not in raw_line:
+            continue
+        subcategory = _field(raw_line, "Подкатегория")
+        manufacturer = _field(raw_line, "Производитель")
+        packaging = _field(raw_line, "Фасовка")
+        price = _field(raw_line, "Цена")
+        availability = _field(raw_line, "Статус наличия")
+        if not all((subcategory, manufacturer, packaging, price, availability)):
+            continue
+        lines.append(
+            f"{subcategory}: {price} за {packaging}; производитель — {manufacturer}; "
+            f"сейчас {availability}"
+        )
+    if not lines:
+        return None
+    prefix = f"{name}, " if name else ""
+    endings = (
+        "Что из этого вам подходит?",
+        "Какой из них посмотреть?",
+        "Что из списка рассмотреть?",
+    )
+    ending = next(
+        (item for item in endings if not previous_reply or item not in previous_reply), endings[0]
+    )
+    return prefix + "В каталоге есть:\n- " + "\n- ".join(lines) + "\n" + ending
+
+
 def grounded_quote_reply(
-    product: str, name: str | None = None, volume: str | None = None
+    product: str,
+    name: str | None = None,
+    volume: str | None = None,
+    previous_reply: str | None = None,
 ) -> str | None:
     cleaned = (product or "").strip().lower()
     tokens = [token for token in re.split(r"\s+", cleaned) if len(token) >= 3]
@@ -221,9 +250,34 @@ def grounded_quote_reply(
         return None
     record = candidates[0]
     prefix = f"{name}, " if name else ""
-    line = (
-        f"Категория: {record.category}; Подкатегория: {record.subcategory}; SKU: {record.sku}; "
-        f"Производитель: {record.manufacturer}; Фасовка: {record.packaging}; Цена: {record.price}; "
-        f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}"
+    endings = ("Самовывоз или доставка?", "Когда удобно забрать или нужна доставка?")
+    ending = next(
+        (item for item in endings if not previous_reply or item not in previous_reply), endings[0]
     )
-    return f"{prefix}{line}. Самовывоз или доставка?"
+    line = (
+        f"{record.subcategory}: {record.price} за {record.packaging}; "
+        f"производитель — {record.manufacturer}; сейчас {record.availability}."
+    )
+    return f"{prefix}{line} {ending}"
+
+
+def budget_quote(product: str, budget: int) -> tuple[int, int, str] | None:
+    """Calculate packages and leftover only for one confirmed primary price."""
+    tokens = [token for token in re.split(r"\s+", (product or "").lower()) if len(token) >= 3]
+    candidates = [
+        record
+        for record in _all_records()
+        if not record.is_competitor
+        and (
+            (product or "").strip().lower() in record.subcategory.lower()
+            or all(token in record.subcategory.lower() for token in tokens)
+            or (len(tokens) == 1 and tokens[0] == record.category.lower())
+        )
+    ]
+    if len(candidates) != 1 or budget <= 0:
+        return None
+    amounts = re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", candidates[0].price.lower())
+    if not amounts:
+        return None
+    price = int(re.sub(r"\s+", "", amounts[0]))
+    return budget // price, budget % price, candidates[0].price

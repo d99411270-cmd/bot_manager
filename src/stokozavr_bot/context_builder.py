@@ -13,6 +13,7 @@ _PROFILE_FIELDS = (
     "email",
     "product",
     "volume",
+    "budget",
     "status",
     "comment",
     "username",

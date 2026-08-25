@@ -142,7 +142,8 @@ async def test_catalog_price_reply_is_sent(now):
 
     result = await service.handle(IncomingMessage(1, None, "Сколько стоят груши и яблоки?"))
 
-    assert "уточню этот вопрос" in result.text.lower()
+    assert "грушевый лог" in result.text.lower()
+    assert "880 ₽" in result.text
 
 
 @pytest.mark.asyncio
@@ -162,7 +163,8 @@ async def test_qualitative_stock_reply_is_sent(now):
 
     result = await service.handle(IncomingMessage(1, None, "Какие овощи сейчас в наличии?"))
 
-    assert "уточню этот вопрос" in result.text.lower()
+    assert "зелёный ряд" in result.text.lower()
+    assert "680 ₽" in result.text
 
 
 @pytest.mark.asyncio
@@ -191,6 +193,92 @@ async def test_exact_stock_count_is_blocked(now):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ai_mode", ["needs_human", "error"])
+async def test_conservation_question_uses_catalog_when_ai_rejects_or_fails(now, ai_mode, caplog):
+    class CatalogFailAI(FakeAI):
+        async def respond(self, profile, history, message):
+            if ai_mode == "error":
+                raise RuntimeError("simulated DeepSeek failure")
+            return AiTurn(reply="", needs_human=True)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=11,
+            name="Пётр",
+            phone="+799****0011",
+            status="уточнение продукта",
+        )
+    )
+    service = ConversationService(repo, CatalogFailAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(11, None, "Какая консервация"))
+
+    assert result.text != "Я уточню этот вопрос и вернусь к вам."
+    assert "огородная банка" in result.text.lower()
+    assert "720 ₽" in result.text
+    assert "росинка" not in result.text.lower()
+    expected_reason = "needs_human" if ai_mode == "needs_human" else "exception"
+    assert f"reason={expected_reason}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_repair_turns_needs_human_into_grounded_answer(now):
+    class RepairAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="", needs_human=True)])
+            self.repair_calls = 0
+
+        async def repair_response(self, profile, history, message, reason, catalog_result):
+            self.repair_calls += 1
+            assert message == "Какая консервация"
+            assert reason == "needs_human"
+            assert "CAN-PEAS-001" in catalog_result
+            return AiTurn(reply="Есть горошек зелёный от Огородной Банки за 720 ₽.")
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=12, name="Пётр", phone="+799****0012", status="уточнение продукта"
+        )
+    )
+    ai = RepairAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(12, None, "Какая консервация"))
+
+    assert "огородной банки" in result.text.lower()
+    assert ai.repair_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_repair_with_empty_catalog_cannot_invent_price(now, monkeypatch):
+    class EmptyCatalogAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="", needs_human=True)])
+            self.repair_calls = 0
+
+        async def repair_response(self, profile, history, message, reason, catalog_result):
+            self.repair_calls += 1
+            assert catalog_result == "Каталог пуст."
+            return AiTurn(reply="Консервация стоит 890 ₽.")
+
+    monkeypatch.setattr("stokozavr_bot.service.search", lambda _query: "Каталог пуст.")
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=13, name="Пётр", phone="+799****0013", status="уточнение продукта"
+        )
+    )
+    ai = EmptyCatalogAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(13, None, "Какая консервация"))
+
+    assert "890" not in result.text
+    assert ai.repair_calls == 1
+
+
 async def test_ai_gets_profile_and_recent_history_only(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

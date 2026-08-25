@@ -15,6 +15,7 @@ class ClientProfile:
     email: str | None = None
     product: str | None = None
     volume: str | None = None
+    budget: int | None = None
     status: str = "новый"
     first_contact_at: datetime | None = None
     last_contact_at: datetime | None = None

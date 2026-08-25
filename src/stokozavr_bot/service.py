@@ -9,7 +9,13 @@ from typing import Protocol
 from .closing import PENZA_PROMO_AMOUNTS, closing_reply, looks_like_ready_to_buy
 from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
-from .product_catalog import grounded_quote_reply, listed_price_amounts
+from .product_catalog import (
+    budget_quote,
+    grounded_quote_reply,
+    grounded_search_reply,
+    listed_price_amounts,
+    search,
+)
 from .repositories import CRMRepository
 
 START_TEXT = (
@@ -203,13 +209,18 @@ def looks_like_volume(text: str) -> bool:
 
 def extract_volume(text: str) -> str | None:
     match = re.search(
-        r"\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|ящик\w*|"
-        r"паллет\w*|упаков\w*|шт\.?|штук\w*|литр\w*)",
+        r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
+        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|шт\.?|штук\w*|литр\w*)",
         text.lower(),
     )
     if not match:
         return None
     return text[match.start() : match.end()].strip()
+
+
+def extract_budget(text: str) -> int | None:
+    match = re.search(r"(?:на|бюджет(?:ом)?|до)\s*(\d[\d\s]{2,})\s*(?:₽|руб\w*)", text.lower())
+    return int(re.sub(r"\s+", "", match.group(1))) if match else None
 
 
 _NAME_STOP = {
@@ -265,21 +276,46 @@ def is_valid_ai_reply(text: str) -> bool:
     return bool(stripped) and stripped.count("?") <= 1 and not is_unsafe_claim(stripped)
 
 
-_COMPETITOR_MENTION_RE = re.compile(r"конкурент\w*|сравн\w*|альтернатив\w*|вариант\w*", re.IGNORECASE)
+def _ai_rejection_reason(turn: AiTurn | None) -> str | None:
+    if turn is None:
+        return "exception"
+    if turn.needs_human:
+        return "needs_human"
+    if not turn.reply or is_unsafe_claim(turn.reply):
+        return "unsafe_reply" if is_unsafe_claim(turn.reply) else "invalid_reply"
+    if not is_valid_ai_reply(turn.reply):
+        return "invalid_reply"
+    return None
+
+
+def _catalog_has_positions(result: str) -> bool:
+    return any("SKU:" in line for line in result.splitlines())
+
+
+def _repair_reply_is_grounded(reply: str, catalog_result: str) -> bool:
+    if not _catalog_has_positions(catalog_result):
+        return not asks_for_unverified_info(reply)
+    catalog_words = {
+        word.lower()
+        for word in re.findall(r"[а-яёa-z0-9-]{4,}", catalog_result)
+        if word.lower() not in {"категория", "подкатегория", "производитель", "фасовка"}
+    }
+    return any(word in reply.lower() for word in catalog_words)
+
+
+_COMPETITOR_MENTION_RE = re.compile(
+    r"конкурент\w*|сравн\w*|альтернатив\w*|вариант\w*", re.IGNORECASE
+)
 _COMPETITOR_SAFE_REPLY = "Актуальную информацию уточню и вернусь к вам."
 
 
 def limit_competitor_mentions(client: ClientProfile, text: str) -> str:
-    """Allow at most two comparison mentions, separated by a substantive turn."""
-    has_mention = bool(_COMPETITOR_MENTION_RE.search(text))
-    if not has_mention:
-        client.competitor_last_reply = False
-        return text
-    if client.competitor_mentions >= 2 or client.competitor_last_reply:
+    """Suppress competitor/comparison language until the feature is re-enabled."""
+    if _COMPETITOR_MENTION_RE.search(text):
+        client.competitor_mentions = 0
         client.competitor_last_reply = False
         return _COMPETITOR_SAFE_REPLY
-    client.competitor_mentions += 1
-    client.competitor_last_reply = True
+    client.competitor_last_reply = False
     return text
 
 
@@ -376,6 +412,11 @@ class ConversationService:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         semantic = await self._safe_analyze(client, history, message.text)
         captured = self._apply_intake_facts(client, semantic, message.text)
+        budget = extract_budget(text)
+        if budget is not None:
+            client.budget = budget
+            client.comment = self._with_comment(client.comment, f"Бюджет: {budget} ₽")
+            captured = True
 
         if is_irritated(text):
             return await self._finish(
@@ -408,10 +449,34 @@ class ConversationService:
         if looks_like_ready_to_buy(text) and client.name:
             return await self._handle_closing(client, history, message.text, now)
 
+        budget_question = budget is not None and bool(client.product)
+        catalog_result = (
+            search(f"{client.product} {text}")
+            if budget_question
+            else search(text)
+            if _is_catalog_or_price_question(text)
+            else None
+        )
+        if budget_question and catalog_result and _catalog_has_positions(catalog_result):
+            quote = budget_quote(client.product or "", budget or 0)
+            if quote:
+                quantity, remainder, price = quote
+                formatted_budget = f"{budget:,}".replace(",", " ")
+                formatted_remainder = f"{remainder:,}".replace(",", " ")
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply(
+                        f"При бюджете {formatted_budget} ₽ получится взять {quantity} упаковок "
+                        f"по {price}; останется {formatted_remainder} ₽. Подойдёт такой расчёт?"
+                    ),
+                    now,
+                )
+
         if is_qualified(client):
             client.status = "квалифицирован"
             await self.repository.save_client(client)
-            return await self._handle_ai(client, message.text, now)
+            return await self._handle_ai(client, message.text, now, catalog_result)
 
         if (
             captured
@@ -434,10 +499,41 @@ class ConversationService:
                 client, message.text, BotReply(self._fallback_reply(client, semantic, text)), now
             )
 
-        turn = await self._safe_respond(client, history, message.text)
-        if turn and not turn.needs_human and is_valid_ai_reply(turn.reply):
+        turn = await self._safe_respond(client, history, message.text, catalog_result)
+        rejection_reason = _ai_rejection_reason(turn)
+        if rejection_reason is None and turn is not None:
             return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
+        logger.warning(
+            "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
+            client.telegram_id,
+            rejection_reason,
+            bool(turn and turn.needs_human),
+        )
+        repair = await self._safe_repair(
+            client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
+        )
+        repair_reason = _ai_rejection_reason(repair)
+        if (
+            repair_reason is None
+            and repair is not None
+            and _repair_reply_is_grounded(repair.reply, catalog_result or "")
+        ):
+            return await self._finish(client, message.text, BotReply(repair.reply.strip()), now)
+        if repair is not None:
+            logger.warning(
+                "Rejected repair reply for telegram_id=%s reason=%s needs_human=%s",
+                client.telegram_id,
+                repair_reason or "not_grounded",
+                repair.needs_human,
+            )
 
+        catalog_reply = grounded_search_reply(
+            catalog_result or "", client.name, history[-1].assistant_message if history else None
+        )
+        if catalog_reply:
+            return await self._finish(
+                client, message.text, BotReply(catalog_reply, delay=False), now
+            )
         return await self._finish(
             client, message.text, BotReply(self._fallback_reply(client, semantic, text)), now
         )
@@ -452,12 +548,41 @@ class ConversationService:
             return None
 
     async def _safe_respond(
-        self, client: ClientProfile, history: list[HistoryEntry], message: str
+        self,
+        client: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        catalog_result: str | None = None,
     ) -> AiTurn | None:
         try:
+            respond_with_catalog = getattr(self.ai, "respond_with_catalog", None)
+            if catalog_result is not None and callable(respond_with_catalog):
+                return await respond_with_catalog(client, history, message, catalog_result)
             return await self.ai.respond(client, history, message)
         except Exception:
-            logger.exception("DeepSeek request failed for telegram_id=%s", client.telegram_id)
+            logger.exception(
+                "DeepSeek request failed for telegram_id=%s reason=exception", client.telegram_id
+            )
+            return None
+
+    async def _safe_repair(
+        self,
+        client: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        reason: str,
+        catalog_result: str,
+    ) -> AiTurn | None:
+        repair_response = getattr(self.ai, "repair_response", None)
+        if not callable(repair_response):
+            return None
+        try:
+            return await repair_response(client, history, message, reason, catalog_result)
+        except Exception:
+            logger.exception(
+                "DeepSeek repair failed for telegram_id=%s reason=repair_exception",
+                client.telegram_id,
+            )
             return None
 
     def _apply_intake_facts(
@@ -572,6 +697,12 @@ class ConversationService:
         return FALLBACK
 
     @staticmethod
+    def _with_comment(comment: str | None, addition: str) -> str:
+        if comment and addition in comment:
+            return comment
+        return f"{comment}; {addition}" if comment else addition
+
+    @staticmethod
     def _valid_name(value: str | None) -> str | None:
         if not value:
             return None
@@ -631,36 +762,68 @@ class ConversationService:
                 return await self._finish(client, user_message, BotReply(turn.reply.strip()), now)
         return await self._finish(client, user_message, BotReply(fallback), now)
 
-    async def _handle_ai(self, client: ClientProfile, user_message: str, now: datetime) -> BotReply:
+    async def _handle_ai(
+        self,
+        client: ClientProfile,
+        user_message: str,
+        now: datetime,
+        catalog_result: str | None = None,
+    ) -> BotReply:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
-        try:
-            turn = await self.ai.respond(client, history, user_message)
-        except Exception:
-            logger.exception("DeepSeek request failed for telegram_id=%s", client.telegram_id)
-            turn = AiTurn(reply=FALLBACK, needs_human=True)
-
-        self._apply_turn_facts(client, turn)
-        if turn.needs_human or not is_valid_ai_reply(turn.reply):
-            if turn.needs_human:
+        turn = await self._safe_respond(client, history, user_message, catalog_result)
+        self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
+        rejection_reason = _ai_rejection_reason(turn)
+        if rejection_reason is not None:
+            if turn and turn.needs_human:
                 client.needs_human = True
             logger.warning(
-                "Rejected AI reply for telegram_id=%s needs_human=%s text=%r",
+                "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
                 client.telegram_id,
-                turn.needs_human,
-                (turn.reply or "")[:300],
+                rejection_reason,
+                bool(turn and turn.needs_human),
             )
-            quote = grounded_quote_reply(client.product or "", client.name, client.volume)
-            if quote:
-                reply = quote
-                delay = False
+            repair = await self._safe_repair(
+                client, history, user_message, rejection_reason, catalog_result or ""
+            )
+            repair_reason = _ai_rejection_reason(repair)
+            if (
+                repair_reason is None
+                and repair is not None
+                and _repair_reply_is_grounded(repair.reply, catalog_result or "")
+            ):
+                return await self._finish(
+                    client, user_message, BotReply(repair.reply.strip(), delay=False), now
+                )
+            if repair is not None:
+                logger.warning(
+                    "Rejected repair reply for telegram_id=%s reason=%s needs_human=%s",
+                    client.telegram_id,
+                    repair_reason or "not_grounded",
+                    repair.needs_human,
+                )
+            catalog_reply = grounded_search_reply(
+                catalog_result or "",
+                client.name,
+                history[-1].assistant_message if history else None,
+            )
+            if catalog_reply:
+                reply = catalog_reply
             else:
-                reply = FALLBACK
-                client.comment = "Нужен ответ менеджера"
-                delay = False
-        else:
-            reply = turn.reply.strip()
-            delay = True
-        return await self._finish(client, user_message, BotReply(reply, delay=delay), now)
+                quote = grounded_quote_reply(
+                    client.product or "",
+                    client.name,
+                    client.volume,
+                    history[-1].assistant_message if history else None,
+                )
+                if quote:
+                    reply = quote
+                else:
+                    reply = FALLBACK
+                    client.comment = "Нужен ответ менеджера"
+            return await self._finish(client, user_message, BotReply(reply, delay=False), now)
+        return await self._finish(
+            client, user_message, BotReply(turn.reply.strip(), delay=True), now
+        )
 
     @staticmethod
     def _apply_turn_facts(client: ClientProfile, turn: AiTurn) -> None:

@@ -134,7 +134,7 @@ class GoogleSheetsCRMRepository:
 
 def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     comment = _text(row.get("комментарии")) or ""
-    volume, email, skipped, last_name, extra = _parse_comment(comment)
+    volume, email, budget, skipped, last_name, extra = _parse_comment(comment)
     due, sent, extra = _split_followup(extra)
     return ClientProfile(
         telegram_id=telegram_id,
@@ -145,6 +145,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         email=email,
         product=_text(row.get("интересующая продукция")),
         volume=volume,
+        budget=budget,
         status=_text(row.get("статус клиента")) or "новый",
         first_contact_at=_date(row.get("дата первого обращения")),
         last_contact_at=_date(row.get("дата последнего обращения")),
@@ -156,10 +157,13 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     )
 
 
-def _parse_comment(comment: str) -> tuple[str | None, str | None, bool, str | None, str]:
+def _parse_comment(
+    comment: str,
+) -> tuple[str | None, str | None, int | None, bool, str | None, str]:
     volume = None
     email = None
     skipped = False
+    budget = None
     last_name = None
     extras: list[str] = []
     for part in [item.strip() for item in comment.split(" | ") if item.strip()]:
@@ -167,13 +171,17 @@ def _parse_comment(comment: str) -> tuple[str | None, str | None, bool, str | No
             volume = part.removeprefix("Объём: ")
         elif part.startswith("Почта: "):
             email = part.removeprefix("Почта: ")
+        elif part.startswith("Бюджет: "):
+            raw_budget = part.removeprefix("Бюджет: ").replace("₽", "").replace(" ", "")
+            if raw_budget.isdigit():
+                budget = int(raw_budget)
         elif part.startswith("Фамилия: "):
             last_name = part.removeprefix("Фамилия: ")
         elif part == "Без контакта":
             skipped = True
         else:
             extras.append(part)
-    return volume, email, skipped, last_name, " | ".join(extras)
+    return volume, email, budget, skipped, last_name, " | ".join(extras)
 
 
 def _split_followup(extra: str) -> tuple[datetime | None, bool, str]:
@@ -208,9 +216,11 @@ def _build_comment(client: ClientProfile) -> str:
         parts.append(f"Исходный интерес: {', '.join(client.original_interests)}")
     if client.current_interest:
         parts.append(f"Текущий интерес: {client.current_interest}")
-    extra = _split_followup(_parse_comment(client.comment or "")[4])[2]
+    extra = _split_followup(_parse_comment(client.comment or "")[5])[2]
     if client.last_name:
         parts.append(f"Фамилия: {client.last_name}")
+    if client.budget is not None:
+        parts.append(f"Бюджет: {client.budget} ₽")
     if extra:
         parts.append(extra)
     return " | ".join(parts)

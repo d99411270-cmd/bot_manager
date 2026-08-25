@@ -3,6 +3,7 @@ from pathlib import Path
 from stokozavr_bot.product_catalog import (
     _all_records,
     catalog_has_stock_status,
+    grounded_search_reply,
     listed_price_amounts,
     listed_stock_amounts,
     search,
@@ -33,14 +34,24 @@ def test_search_apple_juice_returns_grounded_product_details():
     assert "дата обновления: 2026-08-25" in lowered
 
 
-def test_search_apple_juice_cheaper_returns_one_quiet_alternative():
+def test_grounded_catalog_questions_change_between_adjacent_replies():
+    result = search("яблочный сок")
+    first = grounded_search_reply(result, "Пётр")
+    second = grounded_search_reply(result, "Пётр", first)
+
+    assert first and second
+    assert first != second
+    assert first.count("?") == second.count("?") == 1
+
+
+def test_search_apple_juice_cheaper_never_returns_competitors():
     result = search("яблочный сок подешевле")
 
     lowered = result.lower()
     assert "северная капля" in lowered
-    assert "росинка поля" in lowered
-    assert "990 ₽" in result
-    assert lowered.count("производитель:") == 2
+    assert "росинка поля" not in lowered
+    assert "990 ₽" not in result
+    assert lowered.count("производитель:") == 1
 
 
 def test_regular_apple_juice_search_does_not_dump_competitors():
@@ -50,11 +61,12 @@ def test_regular_apple_juice_search_does_not_dump_competitors():
     assert "990 ₽" not in result
 
 
-def test_search_competitor_is_scoped_to_matching_product():
+def test_search_competitor_request_returns_only_primary_product():
     result = search("вода подешевле")
 
     assert "росинка поля" not in result.lower()
     assert "водный круг" in result.lower()
+    assert "источник луга" not in result.lower()
 
 
 def test_empty_search_lists_categories_from_headings():
@@ -123,7 +135,13 @@ def test_local_catalog_has_exactly_30_primary_and_30_scoped_competitors():
     assert len(competitors) == 30
     assert len({record.sku for record in records}) == 60
     assert {record.category for record in primary} == {
-        "напитки", "овощи", "фрукты", "бакалея", "макароны", "масло", "консервация"
+        "напитки",
+        "овощи",
+        "фрукты",
+        "бакалея",
+        "макароны",
+        "масло",
+        "консервация",
     }
     primary_by_sku = {record.sku: record for record in primary}
     for competitor in competitors:
@@ -145,11 +163,11 @@ def test_every_primary_product_is_searchable_without_competitor_leakage():
         assert competitor.sku not in result
 
 
-def test_comparison_returns_only_matching_primary_and_competitor_pair():
+def test_comparison_returns_only_matching_primary():
     result = search("лимонад цитрусовый сравнить")
 
     assert "LIM-CITRUS-001" in result
-    assert "LIM-CITRUS-ALT-001" in result
-    assert result.lower().count("производитель:") == 2
+    assert "LIM-CITRUS-ALT-001" not in result
+    assert result.lower().count("производитель:") == 1
     assert "SOK-APPLE-001" not in result
     assert "SOK-APPLE-ALT-001" not in result

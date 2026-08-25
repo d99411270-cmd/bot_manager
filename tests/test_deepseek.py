@@ -434,3 +434,32 @@ async def test_plan_followup_reads_history_and_parses_decision():
     assert plan.reply is None
     assert "не пишите больше" in captured["body"]["messages"][-1]["content"]
     assert "tools" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_repair_response_receives_reason_and_catalog_without_tools():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        result = {
+            "reply": "Есть горошек зелёный.",
+            "product": "консервация",
+            "volume": None,
+            "needs_human": False,
+        }
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        turn = await DeepSeekClient("key", client=http).repair_response(
+            ClientProfile(1), [], "Какая консервация", "needs_human", "SKU: CAN-PEAS-001"
+        )
+
+    assert turn.reply == "Есть горошек зелёный."
+    assert "needs_human" in " ".join(
+        item["content"] for item in captured["messages"] if item["role"] == "system"
+    )
+    assert "CAN-PEAS-001" in " ".join(
+        item["content"] for item in captured["messages"] if item["role"] == "system"
+    )
+    assert "tools" not in captured
