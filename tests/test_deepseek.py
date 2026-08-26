@@ -213,6 +213,36 @@ async def test_both_deepseek_prompts_include_personality_and_company_memory():
 
 
 @pytest.mark.asyncio
+async def test_open_dialog_prompt_contains_grounded_recovery_rules_and_address():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        result = {
+            "reply": "Да, заказать можно. Уточним макароны?",
+            "product": None,
+            "volume": None,
+            "needs_human": False,
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(result, ensure_ascii=False)}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        turn = await DeepSeekClient("key", client=http).open_dialog(
+            ClientProfile(1), [], "Заказать можно?", "unsafe_reply", "SKU: VEG-POTATO-001"
+        )
+
+    prompt = "\n".join(item["content"] for item in captured["messages"] if item["role"] == "system")
+    assert "режим восстановления" in prompt.lower()
+    assert "г. Пенза, ул. Аустрина, 137, корп. 2" in prompt
+    assert "только из" in prompt.lower()
+    assert "unsafe_reply" in prompt
+    assert turn.reply.startswith("Да, заказать можно")
+
+
+@pytest.mark.asyncio
 async def test_respond_sends_context_builder_profile_comment_dates_and_history():
     captured = {}
 

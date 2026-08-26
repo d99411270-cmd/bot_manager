@@ -270,6 +270,55 @@ class DeepSeekClient:
             needs_human=data["needs_human"],
         )
 
+    async def open_dialog(
+        self,
+        profile: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        reason: str,
+        catalog_result: str,
+    ) -> AiTurn:
+        """Continue a stalled conversation without relaxing the fact boundary."""
+        prompt = (
+            "Это режим восстановления / open dialogue после тупика. Сам выбери полезный "
+            "следующий ход: ответь на все части сообщения и задай максимум один вопрос. "
+            "Можно свободно выбрать формулировку и следующий шаг, но коммерческие факты "
+            "(цены, наличие, доставка, ассортимент и адрес) бери только из памяти компании "
+            "и подтверждённого каталога. Ничего не обещай и не повторяй техническую заглушку. "
+            "Если факта нет, честно скажи, что его сейчас нельзя подтвердить, и предложи "
+            "полезный следующий шаг. Верни только JSON: "
+            '{"reply": str, "product": str|null, "volume": str|null, "needs_human": bool}. '
+            f"Причина предыдущего отказа: {reason}."
+        )
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": compose_system_prompt(prompt)},
+            {
+                "role": "system",
+                "content": "Контекст клиента: "
+                + json.dumps(build_model_context(profile, history), ensure_ascii=False),
+            },
+            {
+                "role": "system",
+                "content": "Подтверждённый каталог:\n" + (catalog_result or "Нет результата"),
+            },
+        ]
+        for row in history:
+            messages.extend(
+                [
+                    {"role": "user", "content": row.user_message},
+                    {"role": "assistant", "content": row.assistant_message},
+                ]
+            )
+        messages.append({"role": "user", "content": message})
+        data = _coerce_sales_result(_message_text(await self._request_message(messages)))
+        _validate_result(data)
+        return AiTurn(
+            reply=data["reply"].strip(),
+            product=data["product"].strip() if data["product"] else None,
+            volume=data["volume"].strip() if data["volume"] else None,
+            needs_human=data["needs_human"],
+        )
+
     async def analyze_intake(
         self, profile: ClientProfile, history: list[HistoryEntry], message: str
     ) -> IntakeAnalysis:

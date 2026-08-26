@@ -147,6 +147,63 @@ async def test_catalog_price_reply_is_sent(now):
 
 
 @pytest.mark.asyncio
+async def test_open_dialog_recovers_order_question_after_rejected_ai(now):
+    class RecoveryAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="", needs_human=True)])
+            self.recovery_calls = []
+
+        async def open_dialog(self, profile, history, message, reason, catalog_result):
+            self.recovery_calls.append((profile, history, message, reason, catalog_result))
+            return AiTurn(reply="Да, заказать можно. Уточним объём макарон?", needs_human=False)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            1,
+            name="Пётр",
+            phone="+799****0001",
+            product="картофель",
+            volume="100 кг",
+            status="квалифицирован",
+        )
+    )
+    ai = RecoveryAI()
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(1, None, "Заказать можно?")
+    )
+
+    assert "заказать можно" in result.text.lower()
+    assert "сейчас не могу подтвердить" not in result.text.lower()
+    assert len(ai.recovery_calls) == 1
+    assert ai.recovery_calls[0][3] in {"needs_human", "unsafe_reply", "exception"}
+
+
+@pytest.mark.asyncio
+async def test_composite_order_keeps_confirmed_potato_calculation_and_asks_one_question(now):
+    class CompositeAI(FakeAI):
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            assert "Подтверждённый расчёт: 4 сетки" in catalog_result
+            assert "VEG-POTATO-001" in catalog_result
+            assert "макарон" in catalog_result.lower()
+            return AiTurn(
+                reply="Картофель: 4 сетки по 25 кг — 3000 ₽. По макаронам уточните, пожалуйста, какую фасовку выбрать?"
+            )
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(2, name="Пётр", phone="+799****0002", status="уточнение продукта")
+    )
+    result = await ConversationService(repo, CompositeAI(), clock=lambda: now).handle(
+        IncomingMessage(2, None, "Давайте картошку 100 кг, макарон тысяч на 10")
+    )
+
+    assert "3000 ₽" in result.text
+    assert "макарон" in result.text.lower()
+    assert result.text.count("?") == 1
+
+
+@pytest.mark.asyncio
 async def test_qualitative_stock_reply_is_sent(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

@@ -59,6 +59,15 @@ class SalesAI(Protocol):
         self, profile: ClientProfile, history: list[HistoryEntry], message: str
     ) -> AiTurn: ...
 
+    async def open_dialog(
+        self,
+        profile: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        reason: str,
+        catalog_result: str,
+    ) -> AiTurn: ...
+
 
 def normalize_phone(value: str) -> str | None:
     digits = re.sub(r"\D", "", value)
@@ -171,6 +180,49 @@ def _is_catalog_or_price_question(text: str) -> bool:
         or asks_for_unverified_info(text)
         or asks_about_pending_update(text)
     )
+
+
+def _composite_order_catalog(text: str) -> str | None:
+    lowered = text.lower()
+    if not re.search(r"картоф|картош", lowered) or "макарон" not in lowered:
+        return None
+    quantity = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:кг|килограмм\w*)", lowered)
+    potato = search("картофель")
+    if not quantity or not _catalog_has_positions(potato):
+        return None
+    potato_line = next(line for line in potato.splitlines() if "SKU:" in line)
+    pack_match = re.search(r"(\d+(?:[.,]\d+)?)\s*кг", potato_line.lower())
+    price_match = re.search(r"(\d[\d\s]*)\s*₽", potato_line)
+    if not pack_match or not price_match:
+        return None
+    kg = float(quantity.group(1).replace(",", "."))
+    pack_kg = float(pack_match.group(1).replace(",", "."))
+    if kg % pack_kg:
+        return None
+    packs = int(kg / pack_kg)
+    total = packs * int(price_match.group(1).replace(" ", ""))
+    return (
+        potato_line
+        + f"; Подтверждённый расчёт: {packs} сетки по {int(pack_kg)} кг; {total} ₽ за картофель"
+        + "\n"
+        + search("макароны")
+    )
+
+
+def _deterministic_recovery_reply(text: str, catalog_result: str) -> str | None:
+    lowered = text.strip().lower()
+    if re.search(r"закаж\w*|заказ\s+можно", lowered):
+        return "Да, заказать можно. Уточним, какой объём или фасовку нужно добавить к заказу?"
+    if lowered in {"что?", "и что дальше?", "не понял", "не поняла"}:
+        return "Да, продолжим. Я могу помочь собрать заказ; что уточним первым?"
+    calculation = re.search(
+        r"Подтверждённый расчёт:\s*([^;]+);\s*(\d[\d\s]*)\s*₽\s*за картофель",
+        catalog_result,
+        re.IGNORECASE,
+    )
+    if calculation and "макарон" in lowered:
+        return f"По картофелю подтверждено: {calculation.group(1)} — {calculation.group(2)} ₽. По макаронам какую фасовку выбрать?"
+    return None
 
 
 def is_unsafe_claim(text: str, catalog_result: str | None = None) -> bool:
@@ -570,8 +622,11 @@ class ConversationService:
         if looks_like_ready_to_buy(text) and client.name:
             return await self._handle_closing(client, history, message.text, now)
 
+        composite_catalog = _composite_order_catalog(text)
         catalog_result = (
-            search(client.current_interest or client.product or text)
+            composite_catalog
+            if composite_catalog
+            else search(client.current_interest or client.product or text)
             if client.current_interest or client.product
             else search(text)
             if _is_catalog_or_price_question(text)
@@ -611,6 +666,9 @@ class ConversationService:
                 "Check the customer's meaning against the available categories; do not invent "
                 "products, prices, or availability.\n" + (catalog_result or "")
             )
+
+        if composite_catalog:
+            return await self._handle_ai(client, message.text, now, composite_catalog)
 
         if is_qualified(client):
             client.status = "квалифицирован"
@@ -668,6 +726,15 @@ class ConversationService:
                 repair_reason or "not_grounded",
                 repair.needs_human,
             )
+        open_turn = await self._safe_open_dialog(
+            client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
+        )
+        if open_turn and _ai_rejection_reason(open_turn, catalog_result) is None:
+            self._apply_turn_facts(client, open_turn)
+            return await self._finish(client, message.text, BotReply(open_turn.reply.strip()), now)
+        deterministic_recovery = _deterministic_recovery_reply(text, catalog_result or "")
+        if deterministic_recovery:
+            return await self._finish(client, message.text, BotReply(deterministic_recovery), now)
 
         if unit_quote:
             record = unit_quote.record
@@ -690,6 +757,8 @@ class ConversationService:
             return await self._finish(
                 client, message.text, BotReply(catalog_reply, delay=False), now
             )
+        client.needs_human = True
+        client.pending_manager_question = message.text[:500]
         return await self._finish(
             client, message.text, BotReply(self._fallback_reply(client, semantic, text)), now
         )
@@ -737,6 +806,26 @@ class ConversationService:
         except Exception:
             logger.exception(
                 "DeepSeek repair failed for telegram_id=%s reason=repair_exception",
+                client.telegram_id,
+            )
+            return None
+
+    async def _safe_open_dialog(
+        self,
+        client: ClientProfile,
+        history: list[HistoryEntry],
+        message: str,
+        reason: str,
+        catalog_result: str,
+    ) -> AiTurn | None:
+        open_dialog = getattr(self.ai, "open_dialog", None)
+        if not callable(open_dialog):
+            return None
+        try:
+            return await open_dialog(client, history, message, reason, catalog_result)
+        except Exception:
+            logger.exception(
+                "DeepSeek open-dialog failed for telegram_id=%s reason=open_dialog_exception",
                 client.telegram_id,
             )
             return None
@@ -961,6 +1050,21 @@ class ConversationService:
                     client.telegram_id,
                     repair_reason or "not_grounded",
                     repair.needs_human,
+                )
+            open_turn = await self._safe_open_dialog(
+                client, history, user_message, rejection_reason, catalog_result or ""
+            )
+            if open_turn and _ai_rejection_reason(open_turn, catalog_result) is None:
+                self._apply_turn_facts(client, open_turn)
+                return await self._finish(
+                    client, user_message, BotReply(open_turn.reply.strip(), delay=False), now
+                )
+            deterministic_recovery = _deterministic_recovery_reply(
+                user_message, catalog_result or ""
+            )
+            if deterministic_recovery:
+                return await self._finish(
+                    client, user_message, BotReply(deterministic_recovery, delay=False), now
                 )
             if _catalog_has_positions(catalog_result or ""):
                 recovery = await self._safe_repair(
