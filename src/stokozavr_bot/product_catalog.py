@@ -201,6 +201,14 @@ def _price_amount(price: str) -> float | None:
     return float(match.group(1).replace(" ", "").replace(",", "."))
 
 
+def _packaging_piece_count(packaging: str) -> float | None:
+    match = re.fullmatch(
+        r"\s*(\d+(?:[.,]\d+)?)\s*x\s*\d+(?:[.,]\d+)?\s*(?:кг|г|л|мл|шт|штук)\s*",
+        packaging.lower(),
+    )
+    return float(match.group(1).replace(",", ".")) if match else None
+
+
 def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
     """Calculate a unit price only from one confirmed primary catalog record."""
     requested = {
@@ -231,9 +239,14 @@ def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
         return None
     parsed = _parse_packaging_quantity(candidates[0].packaging)
     price = _price_amount(candidates[0].price)
-    if parsed is None or price is None or parsed[1] != requested or parsed[0] <= 0:
+    piece_count = _packaging_piece_count(candidates[0].packaging)
+    if parsed is None or price is None or piece_count is None or piece_count <= 0:
         return None
     total, normalized = parsed
+    if requested == "шт":
+        total, normalized = piece_count, "шт"
+    elif normalized != requested:
+        return None
     return UnitPriceQuote(
         record=candidates[0],
         unit=normalized,

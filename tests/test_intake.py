@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -288,6 +289,46 @@ async def test_telegram_contact_and_explicit_phone_are_deterministic(now):
     assert (await repo.get_client(23)).phone == "+79991234567"
     assert "продукция" in result.text.lower()
     assert ai.intake_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("8996247591", "не хватает одной цифры"),
+        ("899624759101", "лишняя цифра"),
+    ],
+)
+async def test_invalid_phone_length_never_echoes_numeric_example_or_saves_phone(
+    now, message, expected
+):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(24, name="Анна", status="ожидает телефон"))
+    ai = SemanticAI([analysis("provide_data", phone="89962475910", reply="Пример 89962475910")])
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(24, None, message))
+    saved = await repo.get_client(24)
+
+    assert expected in result.text.lower()
+    assert not re.search(r"\d{10,12}", result.text)
+    assert saved.phone is None
+
+
+@pytest.mark.asyncio
+async def test_mixed_assortment_and_delivery_question_gets_direct_delivery_answer(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(25, name="Анна", phone="+799****4567"))
+    service = ConversationService(repo, SemanticAI([analysis("question")]), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(25, None, "а что у вас есть? доставка есть?"))
+
+    lowered = result.text.lower()
+    assert "достав" in lowered
+    assert "50 000" in result.text
+    assert "бесплат" in lowered
+    assert not result.text.rstrip().endswith("Какая категория вам интересна?")
+    assert result.text.count("?") <= 1
 
 
 @pytest.mark.asyncio

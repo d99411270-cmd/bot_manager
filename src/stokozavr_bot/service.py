@@ -238,6 +238,33 @@ def invalid_phone_length(text: str) -> tuple[int, str] | None:
     return len(digits), "short" if len(digits) == 10 else "long"
 
 
+def _infer_unit_price_request(text: str) -> str | None:
+    lowered = text.lower().replace("ё", "е")
+    if re.search(
+        r"за\s+(?:каждую\s+)?(?:единиц\w*|еден[ие]ц\w*|штук\w*|штуку|шт\b|бутылк\w*)|"
+        r"\b(?:отдельно|поштучно)\b",
+        lowered,
+    ):
+        return "шт"
+    if re.search(r"за\s+(?:каждый\s+)?(?:кг|килограмм\w*)|на\s+килограмм", lowered):
+        return "кг"
+    if re.search(r"за\s+(?:каждый\s+)?(?:л|литр\w*)|на\s+литр", lowered):
+        return "л"
+    return None
+
+
+def _is_generic_fallback_reply(reply: str) -> bool:
+    normalized = re.sub(r"[^а-яёa-z]+", " ", reply.lower()).strip()
+    return normalized in {
+        re.sub(r"[^а-яёa-z]+", " ", FALLBACK.lower()).strip(),
+        "актуальную информацию уточню и вернусь к вам",
+    }
+
+
+def _asks_about_delivery(text: str) -> bool:
+    return bool(re.search(r"достав\w*|привез\w*|привезти", text.lower()))
+
+
 def extract_volume(text: str) -> str | None:
     match = re.search(
         r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
@@ -421,6 +448,18 @@ class ConversationService:
         if text.lower() in {"/start", "start", "начать"}:
             return await self._handle_start(client, message.text, now)
 
+        invalid_phone = invalid_phone_length(message.text)
+        if client.name and not client.phone and invalid_phone:
+            history = await self.repository.get_history(client.telegram_id, self.history_limit)
+            signal = f"[STRUCTURED_SIGNAL invalid_phone_length={invalid_phone[0]} direction={'short' if invalid_phone[1] == 'short' else 'long'}]"
+            await self._safe_respond(client, history, f"{message.text} {signal}")
+            wording = (
+                "Похоже, в номере не хватает одной цифры, проверьте и отправьте ещё раз."
+                if invalid_phone[1] == "short"
+                else "Похоже, в номере лишняя цифра, проверьте и отправьте ещё раз."
+            )
+            return await self._finish(client, message.text, BotReply(wording), now)
+
         if client.name and not client.phone:
             deterministic_phone = normalize_phone(message.contact_phone or text)
             if deterministic_phone:
@@ -507,6 +546,17 @@ class ConversationService:
                 now,
             )
 
+        if asks_about_assortment(text) and _asks_about_delivery(text):
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(
+                    PRODUCT_ASSORTMENT
+                    + "Да, доставка есть. По Пензе она бесплатная при заказе от 50 000 ₽."
+                ),
+                now,
+            )
+
         if prefers_chat_here(text) and client.name and not has_contact(client):
             client.contact_skipped = True
             client.status = "уточнение продукта"
@@ -528,10 +578,13 @@ class ConversationService:
             else None
         )
         unit_quote = None
-        if semantic and semantic.unit_price_request:
+        requested_unit = (
+            semantic.unit_price_request if semantic else None
+        ) or _infer_unit_price_request(text)
+        if requested_unit:
             target = (
-                semantic.target_product
-                or semantic.product
+                (semantic.target_product if semantic else None)
+                or (semantic.product if semantic else None)
                 or client.current_interest
                 or client.product
             )
@@ -539,7 +592,7 @@ class ConversationService:
                 client.current_interest = target[:300]
                 if has_contact(client):
                     client.product = target[:300]
-                calculated = unit_price_catalog_result(target, semantic.unit_price_request)
+                calculated = unit_price_catalog_result(target, requested_unit)
                 if calculated:
                     catalog_result, unit_quote = calculated
 
@@ -587,6 +640,8 @@ class ConversationService:
 
         turn = await self._safe_respond(client, history, message.text, catalog_result)
         rejection_reason = _ai_rejection_reason(turn, catalog_result)
+        if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
+            rejection_reason = "invalid_reply"
         if rejection_reason is None and turn is not None:
             self._remember_catalog_interest(client, catalog_result, turn.reply)
             return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
@@ -613,6 +668,14 @@ class ConversationService:
                 repair_reason or "not_grounded",
                 repair.needs_human,
             )
+
+        if unit_quote:
+            record = unit_quote.record
+            reply = (
+                f"{record.subcategory}: {unit_quote.unit_price} "
+                f"({record.packaging}, {record.price} за упаковку)."
+            )
+            return await self._finish(client, message.text, BotReply(reply), now)
 
         catalog_reply = (
             None
@@ -869,8 +932,10 @@ class ConversationService:
         if turn is not None and _ai_rejection_reason(turn, catalog_result) is None:
             self._remember_catalog_interest(client, catalog_result, turn.reply)
         rejection_reason = _ai_rejection_reason(turn, catalog_result)
+        if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
+            rejection_reason = "invalid_reply"
         if rejection_reason is not None:
-            if turn and turn.needs_human:
+            if turn and turn.needs_human and not unit_quote:
                 client.needs_human = True
             logger.warning(
                 "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
@@ -909,8 +974,6 @@ class ConversationService:
                     return await self._finish(
                         client, user_message, BotReply(recovery.reply.strip(), delay=False), now
                     )
-                client.needs_human = True
-                client.pending_manager_question = user_message[:500]
                 if unit_quote:
                     record = unit_quote.record
                     reply = (
@@ -918,6 +981,8 @@ class ConversationService:
                         f"({record.packaging}, {record.price} за упаковку)."
                     )
                     return await self._finish(client, user_message, BotReply(reply), now)
+                client.needs_human = True
+                client.pending_manager_question = user_message[:500]
                 if not callable(
                     getattr(self.ai, "repair_response", None)
                 ) and rejection_reason not in {"unsafe_reply", "invalid_reply"}:

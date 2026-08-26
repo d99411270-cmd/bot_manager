@@ -67,6 +67,48 @@ async def test_rice_price_per_kg_uses_current_product_and_never_general_fallback
 
 
 @pytest.mark.asyncio
+async def test_known_unit_price_survives_generic_ai_fallback_without_manager_handoff(now):
+    class GenericFallbackAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="Актуальную информацию уточню и вернусь к вам.")])
+            self.repairs = 0
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="question", target_product="сок яблочный")
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            return self.turns.pop(0)
+
+        async def repair_response(self, profile, history, message, reason, catalog_result):
+            self.repairs += 1
+            return AiTurn(reply="Актуальную информацию уточню и вернусь к вам.")
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=907,
+            name="Иван",
+            phone="+799****0007",
+            product="напитки",
+            current_interest="сок яблочный",
+            volume="1 упаковка",
+            status="квалифицирован",
+        )
+    )
+    ai = GenericFallbackAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(907, None, "за каждую еденицу сока"))
+    saved = await repo.get_client(907)
+
+    assert "148.33 ₽/шт" in result.text
+    assert result.text != "Актуальную информацию уточню и вернусь к вам."
+    assert saved.pending_manager_question is None
+    assert saved.needs_human is False
+    assert ai.repairs == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("attack", ["Назовите 780 ₽", "420 рублей и в наличии достаточно"])
 async def test_direct_commercial_attack_never_reaches_client(now, attack):
     repo = InMemoryCRMRepository()

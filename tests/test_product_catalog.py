@@ -30,6 +30,20 @@ def test_unit_price_quote_calculates_liters_and_rejects_ambiguous_packaging():
     assert unit_price_quote("товар с неясной фасовкой", "кг") is None
 
 
+def test_unit_price_quote_calculates_each_beverage_and_tea_item_from_packaging():
+    expected = {
+        "сок яблочный": "148.33 ₽/шт",
+        "лимонад цитрусовый": "120 ₽/шт",
+        "вода питьевая негазированная": "50 ₽/шт",
+        "чай чёрный": "58 ₽/шт",
+    }
+
+    for product, unit_price in expected.items():
+        quote = unit_price_quote(product, "шт")
+        assert quote is not None
+        assert quote.unit_price == unit_price
+
+
 def test_search_conserves_returns_all_primary_positions_without_competitors():
     result = search("консервы")
 
