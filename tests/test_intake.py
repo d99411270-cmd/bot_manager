@@ -5,7 +5,12 @@ import pytest
 
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.repositories import InMemoryCRMRepository
-from stokozavr_bot.service import FALLBACK, PRODUCT_QUESTION, ConversationService, normalize_phone
+from stokozavr_bot.service import (
+    FALLBACK,
+    PRODUCT_QUESTION,
+    ConversationService,
+    normalize_phone,
+)
 
 
 class SemanticAI:
@@ -316,6 +321,47 @@ async def test_invalid_phone_length_never_echoes_numeric_example_or_saves_phone(
 
 
 @pytest.mark.asyncio
+async def test_eight_digit_phone_is_rejected_without_advancing_or_saving(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(240, name="Андрей", status="ожидает телефон"))
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(240, None, "66556788"))
+
+    saved = await repo.get_client(240)
+    assert "не получилось распознать номер" in result.text.lower()
+    assert saved.phone is None
+    assert saved.status == "ожидает телефон"
+
+
+@pytest.mark.asyncio
+async def test_invalid_phone_followup_does_not_repeat_prompt_without_new_attempt(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(241, name="Андрей", status="ожидает телефон"))
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(241, None, "66556788"))
+    second = await service.handle(IncomingMessage(241, None, "хорошо"))
+
+    assert "не получилось распознать номер" in first.text.lower()
+    assert "номер телефона" not in second.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_valid_eleven_digit_phone_is_accepted(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(242, name="Андрей", status="ожидает телефон"))
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(242, None, "89991234567"))
+
+    saved = await repo.get_client(242)
+    assert saved.phone == "+79991234567"
+    assert saved.status == "уточнение продукта"
+    assert "продукция" in result.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_mixed_assortment_and_delivery_question_gets_direct_delivery_answer(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(ClientProfile(25, name="Анна", phone="+799****4567"))
@@ -342,3 +388,20 @@ async def test_assortment_question_answers_even_when_deepseek_fails(now):
     assert PRODUCT_QUESTION not in result.text
     assert result.text == FALLBACK
     assert (await repo.get_client(62)).product is None
+
+
+@pytest.mark.asyncio
+async def test_assortment_answer_offers_generated_price_list(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(63, name="Дмитрий", phone="+799****4567"))
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            [analysis("question")], [AiTurn(reply="В каталоге есть основные категории продуктов.")]
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(IncomingMessage(63, None, "какой у вас ассортимент?"))
+
+    assert "выслать актуальный прайс" in result.text.lower()

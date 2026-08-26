@@ -13,6 +13,7 @@ from .product_catalog import (
     UnitPriceQuote,
     grounded_search_reply,
     infer_catalog_interest,
+    recover_product_from_history,
     search,
     unit_price_catalog_result,
 )
@@ -70,14 +71,20 @@ class SalesAI(Protocol):
 
 
 def normalize_phone(value: str) -> str | None:
-    digits = re.sub(r"\D", "", value)
-    if len(digits) == 11 and digits.startswith("8"):
-        digits = "7" + digits[1:]
-    if len(digits) == 10 and digits.startswith("9"):
-        digits = "7" + digits
-    if len(digits) != 11 or not digits.startswith("7"):
+    compact = re.sub(r"[\s().-]", "", value or "")
+    digits = re.sub(r"\D", "", compact)
+    if len(digits) != 11:
         return None
-    return "+" + digits
+    if compact.startswith("8"):
+        return "+7" + digits[1:]
+    if compact.startswith("+7"):
+        return "+" + digits
+    return None
+
+
+def normalize_landline(value: str) -> str | None:
+    digits = re.sub(r"\D", "", value or "")
+    return digits if len(digits) == 6 else None
 
 
 def normalize_email(value: str) -> str | None:
@@ -180,6 +187,21 @@ def _is_catalog_or_price_question(text: str) -> bool:
         or asks_for_unverified_info(text)
         or asks_about_pending_update(text)
     )
+
+
+def asks_for_competitor(text: str) -> bool:
+    return bool(re.search(r"подешев\w*|есть вариант\w*|сравн\w*|альтернатив\w*", text.lower()))
+
+
+def should_offer_price_list(text: str) -> bool:
+    lowered = text.lower()
+    return bool(
+        asks_about_assortment(text)
+        or re.search(r"прайс|каталог|список|всё нужно|все нужно|разн\w+ продукц|не знаю", lowered)
+    )
+
+
+PRICE_LIST_OFFER = "Могу проконсультировать по товарам или выслать актуальный прайс."
 
 
 def _composite_order_catalog(text: str) -> str | None:
@@ -290,10 +312,16 @@ def invalid_phone_length(text: str) -> tuple[int, str] | None:
     return len(digits), "short" if len(digits) == 10 else "long"
 
 
+def phone_digit_attempt(text: str) -> bool:
+    """Return whether a phone-stage message is a numeric phone attempt."""
+    stripped = text.strip()
+    return bool(re.fullmatch(r"[\d\s()+./-]+", stripped) and re.search(r"\d", stripped))
+
+
 def _infer_unit_price_request(text: str) -> str | None:
     lowered = text.lower().replace("ё", "е")
     if re.search(
-        r"за\s+(?:каждую\s+)?(?:единиц\w*|еден[ие]ц\w*|штук\w*|штуку|шт\b|бутылк\w*)|"
+        r"за\s+(?:каждую\s+)?(?:\d+\s*)?(?:единиц\w*|еден[ие]ц\w*|штук\w*|штуку|шт\b|бутылк\w*|банк\w*)|"
         r"\b(?:отдельно|поштучно)\b",
         lowered,
     ):
@@ -432,12 +460,14 @@ _COMPETITOR_MENTION_RE = re.compile(
 _COMPETITOR_SAFE_REPLY = "Актуальную информацию уточню и вернусь к вам."
 
 
-def limit_competitor_mentions(client: ClientProfile, text: str) -> str:
-    """Suppress competitor/comparison language until the feature is re-enabled."""
+def limit_competitor_mentions(client: ClientProfile, text: str, *, allowed: bool = False) -> str:
+    """Allow explicitly requested alternatives at most twice, never consecutively."""
     if _COMPETITOR_MENTION_RE.search(text):
-        client.competitor_mentions = 0
-        client.competitor_last_reply = False
-        return _COMPETITOR_SAFE_REPLY
+        if not allowed or client.competitor_mentions >= 2 or client.competitor_last_reply:
+            return _COMPETITOR_SAFE_REPLY
+        client.competitor_mentions += 1
+        client.competitor_last_reply = True
+        return text
     client.competitor_last_reply = False
     return text
 
@@ -496,14 +526,37 @@ class ConversationService:
         client.username = message.username or client.username
         client.last_contact_at = now
         text = message.text.strip()
-        # A new substantive client turn separates comparison mentions.
-        client.competitor_last_reply = False
+        # The limiter clears this flag only after a substantive non-competitor reply.
 
         if text.lower() in {"/start", "start", "начать"}:
             return await self._handle_start(client, message.text, now)
 
         invalid_phone = invalid_phone_length(message.text)
+        phone_attempt = phone_digit_attempt(message.contact_phone or message.text)
+        landline = normalize_landline(message.contact_phone or text)
+        if client.name and not client.phone and landline and not message.contact_phone:
+            client.landline = landline
+            client.phone_correction_pending = True
+            client.status = "ожидает телефон"
+            return await self._finish(
+                client,
+                message.text,
+                BotReply("Городской номер сохранил. Теперь пришлите, пожалуйста, мобильный номер."),
+                now,
+            )
+        if client.name and not client.phone and phone_attempt and not invalid_phone:
+            if normalize_phone(message.contact_phone or text):
+                invalid_phone = None
+            else:
+                client.phone_correction_pending = True
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply("Не получилось распознать номер, проверьте.", delay=False),
+                    now,
+                )
         if client.name and not client.phone and invalid_phone:
+            client.phone_correction_pending = True
             history = await self.repository.get_history(client.telegram_id, self.history_limit)
             signal = f"[STRUCTURED_SIGNAL invalid_phone_length={invalid_phone[0]} direction={'short' if invalid_phone[1] == 'short' else 'long'}]"
             await self._safe_respond(client, history, f"{message.text} {signal}")
@@ -517,6 +570,7 @@ class ConversationService:
         if client.name and not client.phone:
             deterministic_phone = normalize_phone(message.contact_phone or text)
             if deterministic_phone:
+                client.phone_correction_pending = False
                 client.phone = deterministic_phone
                 client.contact_skipped = False
                 client.status = "уточнение продукта"
@@ -625,11 +679,21 @@ class ConversationService:
             return await self._handle_closing(client, history, message.text, now)
 
         composite_catalog = _composite_order_catalog(text)
+        competitor_request = asks_for_competitor(text)
         catalog_result = (
             composite_catalog
             if composite_catalog
-            else search(client.current_interest or client.product or text)
+            else (
+                search(
+                    client.current_interest or client.product or text,
+                    include_competitors=True,
+                )
+                if competitor_request
+                else search(client.current_interest or client.product or text)
+            )
             if client.current_interest or client.product
+            else search(text, include_competitors=True)
+            if competitor_request
             else search(text)
             if _is_catalog_or_price_question(text)
             else None
@@ -645,6 +709,16 @@ class ConversationService:
                 or client.current_interest
                 or client.product
             )
+            if not target or (
+                target == client.product
+                and not (semantic and (semantic.target_product or semantic.product))
+            ):
+                recovered = recover_product_from_history(
+                    "\n".join(f"{row.user_message}\n{row.assistant_message}" for row in history),
+                    client.product,
+                )
+                if recovered:
+                    target = recovered
             if target:
                 client.current_interest = target[:300]
                 if has_contact(client):
@@ -929,6 +1003,8 @@ class ConversationService:
             "ожидает телефон",
             "ожидает почту",
         }:
+            if client.phone_correction_pending:
+                return "Хорошо, жду корректный номер, когда будете готовы."
             if client.status == "ожидает почту":
                 return EMAIL_QUESTION
             prefix = self._intake_prefix(semantic, "phone", "")
@@ -1068,6 +1144,13 @@ class ConversationService:
                 return await self._finish(
                     client, user_message, BotReply(deterministic_recovery, delay=False), now
                 )
+            if unit_quote:
+                record = unit_quote.record
+                reply = (
+                    f"{record.subcategory}: {unit_quote.unit_price} "
+                    f"({record.packaging}, {record.price} за упаковку)."
+                )
+                return await self._finish(client, user_message, BotReply(reply), now)
             if _catalog_has_positions(catalog_result or ""):
                 recovery = await self._safe_repair(
                     client, history, user_message, "recovery_attempt_2", catalog_result or ""
@@ -1162,7 +1245,16 @@ class ConversationService:
         self, client: ClientProfile, user_message: str, reply: BotReply, now: datetime
     ) -> BotReply:
         apply_followup_rules(client, user_message, reply.text, now, self.followup_delay)
-        reply = BotReply(limit_competitor_mentions(client, reply.text), delay=reply.delay)
+        safe_text = limit_competitor_mentions(
+            client, reply.text, allowed=asks_for_competitor(user_message)
+        )
+        if (
+            should_offer_price_list(user_message)
+            and "актуальный прайс" not in safe_text.lower()
+            and not _is_generic_fallback_reply(safe_text)
+        ):
+            safe_text = PRICE_LIST_OFFER + "\n\n" + safe_text
+        reply = BotReply(safe_text, delay=reply.delay)
         if reply_quoted_price(reply.text) and client.status != "готов к заказу":
             client.status = "получил предложение"
         await self.repository.save_client(client)

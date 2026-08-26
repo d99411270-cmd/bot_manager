@@ -58,6 +58,29 @@ def test_prompt_bundle_falls_back_to_repo_when_env_dir_is_incomplete(tmp_path, m
     assert (REPO_PROMPTS / "company_memory.md").read_text(encoding="utf-8").strip() in bundle
 
 
+def test_prompt_bundle_does_not_mix_company_context_with_catalog_facts():
+    bundle = load_prompt_bundle()
+    company = bundle[bundle.index("# Память компании") : bundle.index("# Память клиента")]
+
+    assert "5 300" in company
+    assert "200–300" in company
+    assert "90%" in company
+    assert "заводов, фабрик, импортёров и крупных поставщиков" in company
+    assert "спокойный живой менеджер" in company
+    assert "Не превращать каждый диалог в анкету" in company
+    assert "company context, а не к product catalog" in company
+    assert "SKU" in company
+    assert (
+        "Конкретные позиции, SKU, производителя, фасовку, цены и наличие называй только из полной подтверждённой"
+        in company
+    )
+
+    # Company figures are instructions/context, never a catalog row or price.
+    assert "SKU: 5300" not in company
+    assert "Цена: 90%" not in company
+    assert "Фасовка: 200–300" not in company
+
+
 def test_pyproject_force_includes_prompts_in_wheel():
     text = (
         Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text(encoding="utf-8")

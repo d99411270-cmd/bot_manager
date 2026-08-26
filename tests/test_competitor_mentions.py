@@ -42,7 +42,7 @@ def test_third_mention_is_replaced_with_safe_reply():
     result = limit_competitor_mentions(profile, "Могу предложить альтернативу.")
 
     assert "конкурент" not in result.lower()
-    assert profile.competitor_mentions == 0
+    assert profile.competitor_mentions == 2
 
 
 def test_two_competitor_answers_cannot_be_consecutive():

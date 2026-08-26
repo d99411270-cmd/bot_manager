@@ -12,6 +12,7 @@ class ClientProfile:
     name: str | None = None
     last_name: str | None = None
     phone: str | None = None
+    landline: str | None = None
     email: str | None = None
     product: str | None = None
     volume: str | None = None
@@ -29,6 +30,7 @@ class ClientProfile:
     pending_manager_question: str | None = None
     competitor_mentions: int = 0
     competitor_last_reply: bool = False
+    phone_correction_pending: bool = False
 
 
 @dataclass(slots=True)

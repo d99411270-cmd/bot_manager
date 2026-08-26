@@ -90,6 +90,7 @@ async def test_google_sheets_persists_email_and_skipped_contact():
     client = ClientProfile(
         telegram_id=7,
         name="Анна",
+        landline="646647",
         email="anna@shop.ru",
         product="груши",
         volume="5 ящиков",
@@ -103,8 +104,10 @@ async def test_google_sheets_persists_email_and_skipped_contact():
     loaded = await repo.get_client(7)
 
     assert loaded.email == "anna@shop.ru"
+    assert loaded.landline == "646647"
     assert loaded.volume == "5 ящиков"
     assert loaded.comment == "важный"
+    assert "Городской телефон: 646647" in book.sheets["Клиенты"].rows[1][-1]
     assert "Почта: anna@shop.ru" in book.sheets["Клиенты"].rows[1][-1]
 
     client.email = None

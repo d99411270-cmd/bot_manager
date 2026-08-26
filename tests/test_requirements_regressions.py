@@ -2,7 +2,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
+from stokozavr_bot.models import (
+    AiTurn,
+    ClientProfile,
+    IncomingMessage,
+    IntakeAnalysis,
+)
 from stokozavr_bot.product_catalog import parse_catalog_records, search
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import ConversationService, _ai_rejection_reason
@@ -124,7 +129,7 @@ async def test_known_unit_price_survives_generic_ai_fallback_without_manager_han
     assert result.text != "Актуальную информацию уточню и вернусь к вам."
     assert saved.pending_manager_question is None
     assert saved.needs_human is False
-    assert ai.repairs == 2
+    assert ai.repairs == 1
 
 
 @pytest.mark.asyncio
@@ -341,3 +346,58 @@ def test_context_can_keep_original_and_current_interests_separately():
     )
     assert profile.original_interests == ["творожки"]
     assert profile.current_interest == "сок"
+
+
+@pytest.mark.asyncio
+async def test_open_dialog_recovers_corn_from_history_after_intake_exception(now):
+    class BrokenIntakeRecoveryAI(FakeAI):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+            self.open_catalog = ""
+
+        async def analyze_intake(self, *args):
+            self.calls.append("intake")
+            raise ValueError("JSONDecodeError")
+
+        async def respond_with_catalog(self, *args):
+            self.calls.append("respond")
+            return AiTurn(reply="Я уточню этот вопрос и вернусь к вам.")
+
+        async def repair_response(self, *args):
+            self.calls.append("repair")
+            return AiTurn(reply="Актуальную информацию уточню и вернусь к вам")
+
+        async def open_dialog(self, profile, history, message, reason, catalog_result):
+            self.calls.append("open_dialog")
+            self.open_catalog = catalog_result
+            return AiTurn(reply="Я уточню этот вопрос и вернусь к вам.")
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            910,
+            name="Иван",
+            phone="+799****0010",
+            product="консервация",
+            current_interest=None,
+            status="квалифицирован",
+        )
+    )
+    await repo.append_history(
+        910,
+        now,
+        "Выбираю кукурузу сладкую",
+        "Подтверждаю: кукуруза сладкая, 12 x 340 г, 690 ₽/упаковка.",
+    )
+    ai = BrokenIntakeRecoveryAI()
+
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(910, None, "Можно цены за 1 банку, а не упаковку?")
+    )
+
+    assert "57.50 ₽/шт" in result.text
+    assert "CAN-CORN-001" in ai.open_catalog
+    assert "Подтверждённый расчёт: 12 шт в упаковке; 57.50 ₽/шт" in ai.open_catalog
+    assert len(ai.calls) == 4
+    assert (await repo.get_client(910)).current_interest == "кукуруза сладкая"

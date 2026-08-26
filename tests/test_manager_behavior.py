@@ -14,6 +14,7 @@ from stokozavr_bot.service import (
     PRODUCT_QUESTION,
     START_TEXT,
     ConversationService,
+    normalize_landline,
     normalize_phone,
     returning_greeting,
 )
@@ -369,12 +370,12 @@ async def test_assortment_question_without_phone_uses_ai_not_form(now):
         clock=lambda: now,
     )
 
-    start = await service.handle(IncomingMessage(100, None, "/start"))
+    await service.handle(IncomingMessage(100, None, "/start"))
     result = await service.handle(IncomingMessage(100, None, "а какая у вас есть?"))
     saved = await repo.get_client(100)
 
-    assert start.text == START_TEXT
-    assert result.text == ai_reply
+    assert result.text.endswith(ai_reply)
+    assert "выслать актуальный прайс" in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert "как я могу к вам обращаться" not in result.text.lower()
     assert "номер телефона" not in result.text.lower()
@@ -486,7 +487,8 @@ async def test_fruits_question_without_phone_does_not_contain_product_question(n
     result = await service.handle(IncomingMessage(200, None, "какие фрукты есть?"))
     saved = await repo.get_client(200)
 
-    assert result.text == ai_reply
+    assert result.text.endswith(ai_reply)
+    assert "выслать актуальный прайс" in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert PRODUCT_ASSORTMENT not in result.text
     assert "номер телефона" not in result.text.lower()
@@ -511,7 +513,8 @@ async def test_name_capture_does_not_interrupt_product_answer(now):
     result = await service.handle(IncomingMessage(201, None, "Анна, какие фрукты есть?"))
     saved = await repo.get_client(201)
 
-    assert result.text == ai_reply
+    assert result.text.endswith(ai_reply)
+    assert "выслать актуальный прайс" in result.text.lower()
     assert saved.name == "Анна"
     assert saved.phone is None
     assert saved.product is None
@@ -553,3 +556,49 @@ async def test_price_question_does_not_invent_price_or_ask_form(now):
     assert "120" not in result.text
     assert PRODUCT_QUESTION not in result.text
     assert result.request_contact is False
+
+
+def test_mobile_requires_russian_8_or_plus7_prefix_and_landline_is_separate():
+    assert normalize_phone("8927 123-45-67") == "+79271234567"
+    assert normalize_phone("+7 927 123-45-67") == "+79271234567"
+    assert normalize_phone("6466473738") is None
+    assert normalize_phone("69271234567") is None
+    assert normalize_landline("646647") == "646647"
+
+
+@pytest.mark.asyncio
+async def test_landline_is_saved_but_mobile_is_requested_and_persisted(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(204, name="Анна", status="ожидает телефон"))
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(204, None, "646647"))
+    saved_landline = await repo.get_client(204)
+
+    assert saved_landline.landline == "646647"
+    assert saved_landline.phone is None
+    assert "мобильн" in first.text.lower()
+
+    second = await service.handle(IncomingMessage(204, None, "8927 123-45-67"))
+    saved_mobile = await repo.get_client(204)
+
+    assert saved_mobile.landline == "646647"
+    assert saved_mobile.phone == "+79271234567"
+    assert "номер телефона" not in second.text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["6466473738", "69271234567"])
+async def test_invalid_mobile_attempt_does_not_overwrite_phone_or_landline(now, value):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(205, name="Анна", landline="646647", status="ожидает телефон")
+    )
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(205, None, value))
+    saved = await repo.get_client(205)
+
+    assert saved.phone is None
+    assert saved.landline == "646647"
+    assert "номер" in result.text.lower()

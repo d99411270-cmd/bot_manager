@@ -209,6 +209,35 @@ def _packaging_piece_count(packaging: str) -> float | None:
     return float(match.group(1).replace(",", ".")) if match else None
 
 
+def recover_product_from_history(history_text: str, category: str | None = None) -> str | None:
+    """Recover one unambiguous primary product named in recent dialogue."""
+    haystack = (history_text or "").lower()
+    if not haystack:
+        return None
+    category_text = (category or "").lower()
+    candidates: list[tuple[int, CatalogRecord]] = []
+    for record in _all_records():
+        if record.is_competitor:
+            continue
+        if (
+            category_text
+            and category_text not in record.category
+            and record.category not in category_text
+        ):
+            continue
+        terms = [
+            term for term in re.findall(r"[\w-]+", record.subcategory.lower()) if len(term) >= 4
+        ]
+        score = sum(term in haystack for term in terms)
+        if score:
+            candidates.append((score, record))
+    if not candidates:
+        return None
+    best_score = max(score for score, _record in candidates)
+    best = [record for score, record in candidates if score == best_score]
+    return best[0].subcategory if len(best) == 1 else None
+
+
 def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
     """Calculate a unit price only from one confirmed primary catalog record."""
     requested = {
@@ -306,7 +335,7 @@ def _query_terms(query: str) -> list[str]:
     return terms
 
 
-def search(query: str) -> str:
+def search(query: str, *, include_competitors: bool = False) -> str:
     files = _load_catalog()
     if not files:
         return "Каталог пуст."
@@ -325,7 +354,12 @@ def search(query: str) -> str:
         return any(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", haystack) for token in tokens)
 
     primary = [record for record in records if not record.is_competitor and matches(record)]
+    competitors = [record for record in records if record.is_competitor and matches(record)]
     matched = primary
+    if include_competitors and primary:
+        matched = primary + competitors
+    elif include_competitors and competitors:
+        matched = competitors
 
     if not matched:
         return f"Подтверждённых позиций по запросу «{query.strip()}» нет.\n\n{_category_listing(files)}"
@@ -354,6 +388,30 @@ def catalog_has_stock_status() -> bool:
 def catalog_price_lines(query: str) -> list[str]:
     result = search(query)
     return [line for line in result.splitlines() if "Цена:" in line]
+
+
+def generated_price_list() -> str:
+    """Render the current primary catalog as a customer-safe price list.
+
+    The catalog remains the single source of truth.  Competitors, dates and
+    availability are deliberately omitted from this generated artifact.
+    """
+    records = sorted(
+        (record for record in _all_records() if not record.is_competitor),
+        key=lambda record: (record.category, record.subcategory, record.sku),
+    )
+    lines = [
+        "# Актуальный прайс «Стокозавр»",
+        "",
+        "Товар | SKU | Производитель | Фасовка | Цена",
+        "--- | --- | --- | --- | ---",
+    ]
+    lines.extend(
+        f"Товар: {record.subcategory} | SKU: {record.sku} | Производитель: {record.manufacturer} | "
+        f"Фасовка: {record.packaging} | Цена: {record.price}"
+        for record in records
+    )
+    return "\n".join(lines)
 
 
 def infer_catalog_interest(result: str, reply: str) -> str | None:

@@ -48,7 +48,7 @@ async def test_first_contact_requires_name_phone_product_and_volume_before_ai(no
     assert not ai.calls
 
     invalid = await service.handle(IncomingMessage(10, "buyer", "123"))
-    assert "коррект" in invalid.text.lower()
+    assert "не получилось распознать номер" in invalid.text.lower()
     assert not ai.calls
 
     accepted = await service.handle(IncomingMessage(10, "buyer", "+7 999 123-45-67"))

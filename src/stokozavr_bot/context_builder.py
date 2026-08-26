@@ -10,6 +10,7 @@ _PROFILE_FIELDS = (
     "name",
     "last_name",
     "phone",
+    "landline",
     "email",
     "product",
     "volume",

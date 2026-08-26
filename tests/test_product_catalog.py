@@ -3,6 +3,7 @@ from pathlib import Path
 from stokozavr_bot.product_catalog import (
     _all_records,
     catalog_has_stock_status,
+    generated_price_list,
     grounded_search_reply,
     listed_price_amounts,
     listed_stock_amounts,
@@ -207,6 +208,18 @@ def test_listed_stock_amounts_are_internal_only():
     assert catalog_has_stock_status() is True
 
 
+def test_generated_price_list_contains_only_30_primary_products_without_stock_counts():
+    price_list = generated_price_list()
+
+    assert price_list.count("SKU:") == 30
+    assert "-ALT-" not in price_list
+    assert "конкур" not in price_list.lower()
+    assert "остат" not in price_list.lower()
+    assert not any(token in price_list.lower() for token in ("много", "мало", "нет в наличии"))
+    assert "Цена:" in price_list
+    assert "Фасовка:" in price_list
+
+
 def test_local_catalog_has_exactly_30_primary_and_30_scoped_competitors():
     records = _all_records()
     primary = [record for record in records if not record.is_competitor]
@@ -252,3 +265,11 @@ def test_comparison_returns_only_matching_primary():
     assert result.lower().count("производитель:") == 1
     assert "SOK-APPLE-001" not in result
     assert "SOK-APPLE-ALT-001" not in result
+
+
+def test_explicit_comparison_opt_in_returns_matching_competitor_after_primary():
+    result = search("лимонад цитрусовый сравнить", include_competitors=True)
+
+    assert "LIM-CITRUS-001" in result
+    assert "LIM-CITRUS-ALT-001" in result
+    assert result.index("LIM-CITRUS-001") < result.index("LIM-CITRUS-ALT-001")

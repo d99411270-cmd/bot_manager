@@ -142,6 +142,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         name=_first_name(_text(row.get("имя клиента"))),
         last_name=last_name or _last_name_from_cell(_text(row.get("имя клиента"))),
         phone=_text(row.get("телефон")),
+        landline=_parse_landline(comment),
         email=email,
         product=_text(row.get("интересующая продукция")),
         volume=volume,
@@ -177,11 +178,21 @@ def _parse_comment(
                 budget = int(raw_budget)
         elif part.startswith("Фамилия: "):
             last_name = part.removeprefix("Фамилия: ")
+        elif part.startswith("Городской телефон: "):
+            continue
         elif part == "Без контакта":
             skipped = True
         else:
             extras.append(part)
     return volume, email, budget, skipped, last_name, " | ".join(extras)
+
+
+def _parse_landline(comment: str) -> str | None:
+    for part in [item.strip() for item in comment.split(" | ") if item.strip()]:
+        if part.startswith("Городской телефон: "):
+            value = part.removeprefix("Городской телефон: ").strip()
+            return value if value.isdigit() and len(value) == 6 else None
+    return None
 
 
 def _split_followup(extra: str) -> tuple[datetime | None, bool, str]:
@@ -202,6 +213,8 @@ def _build_comment(client: ClientProfile) -> str:
     parts: list[str] = []
     if client.volume:
         parts.append(f"Объём: {client.volume}")
+    if client.landline:
+        parts.append(f"Городской телефон: {client.landline}")
     if client.email:
         parts.append(f"Почта: {client.email}")
     if client.contact_skipped:
