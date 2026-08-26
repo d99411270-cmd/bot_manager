@@ -8,3 +8,6 @@ __pycache__/
 !*.example.json
 coverage.xml
 htmlcov/
+qa-dialogues/*
+!qa-dialogues/README.md
+.qa/

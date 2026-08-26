@@ -37,6 +37,7 @@
 - CRM: `CRMRepository` + Google Sheets + in-memory fake. Объём по-прежнему в `комментарии` как `Объём: ...`.
 - SOCKS только для Telegram (`TELEGRAM_PROXY_URL`). Sheets и DeepSeek напрямую.
 - Setup-wizard в `tools/setup_wizard.py` без изменений этой фазы.
+- Изолированный QA-стенд: `stokozavr_bot.qa_stand` / `python -m stokozavr_bot.qa_stand`. Реальный `ConversationService` и DeepSeek-клиент, CRM только `InMemoryCRMRepository`, telegram_id ≥ 2_000_000_000. Google Sheets и Telegram не импортируются. Транскрипты в `qa-dialogues/` (gitignore). Живой smoke требует `DEEPSEEK_API_KEY` в env/.env; без ключа стенд готов, сеть не дергается.
 
 ## Решения и ограничения
 
@@ -51,7 +52,16 @@
 
 ## Проверка
 
-- На 2026-08-26 (локальный тестовый каталог, opt-in конкуренты с лимитом 2, generated primary price list, Telegram attachment delivery/state, strict invalid-phone, landline/mobile validation, company-memory rules and generic fallback recovery):
+- На 2026-08-26 (изолированный QA-стенд для Grok-тестеров, без product behaviour):
+
+- `.venv/bin/pytest -q` — `300 passed`.
+- `.venv/bin/ruff check .` — `All checks passed!`.
+- `.venv/bin/ruff format --check .` — `59 files already formatted`.
+- `git diff --check` — без ошибок.
+- Живой DeepSeek smoke: локально **нет** `DEEPSEEK_API_KEY` / `.env`. CLI вернул `SMOKE=blocked`. Сеть не вызывалась.
+- Пуш и деплой **не** выполнялись.
+
+Ранее на 2026-08-26 (локальный тестовый каталог, opt-in конкуренты с лимитом 2, generated primary price list, Telegram attachment delivery/state, strict invalid-phone, landline/mobile validation, company-memory rules and generic fallback recovery):
 
 - `.venv/bin/pytest -q` — `285 passed`.
 - `.venv/bin/ruff check .` — `All checks passed!`.
