@@ -296,6 +296,12 @@ def asks_for_price_list_in_chat(text: str) -> bool:
     return asks_for_price_list(text) and _mentions_chat_here(text)
 
 
+def asks_for_price_list_by_email(text: str) -> bool:
+    if not asks_for_price_list(text) or _rejects_email_delivery(text):
+        return False
+    return bool(re.search(r"\bна почт|\bна e-?mail\b|\bemail\b|\be-mail\b", text.lower()))
+
+
 def _mentions_chat_here(text: str) -> bool:
     return bool(
         re.search(
@@ -305,6 +311,19 @@ def _mentions_chat_here(text: str) -> bool:
             text.lower(),
         )
     )
+
+
+def _rejects_email_delivery(text: str) -> bool:
+    return bool(
+        re.search(
+            r"не на почт|на почт\w* не надо|на почт\w* не нужн|почту не надо|не надо на почт",
+            text.lower(),
+        )
+    )
+
+
+def _wants_price_list_in_chat(text: str) -> bool:
+    return _mentions_chat_here(text) or _rejects_email_delivery(text)
 
 
 def _price_list_pending_from_history(history: list[HistoryEntry]) -> bool:
@@ -1220,7 +1239,7 @@ class ConversationService:
         if (
             client
             and client.price_list_requested
-            and (normalize_email(text) or _mentions_chat_here(text))
+            and (normalize_email(text) or _wants_price_list_in_chat(text))
         ):
             return False
         if not client or not client.name:
@@ -1353,7 +1372,7 @@ class ConversationService:
         pending_price_list = client.price_list_requested or (
             not client.price_list_sent_at and _price_list_pending_from_history(history)
         )
-        if cancels_price_list(text):
+        if cancels_price_list(text) and not _wants_price_list_in_chat(text):
             client.price_list_requested = False
             return await self._finish(
                 client,
@@ -1361,7 +1380,17 @@ class ConversationService:
                 BotReply("Хорошо, без прайса."),
                 now,
             )
-        if asks_for_price_list_in_chat(text) or (pending_price_list and _mentions_chat_here(text)):
+        if asks_for_price_list_by_email(text) and not _wants_price_list_in_chat(text):
+            client.price_list_requested = True
+            if client.name and not has_contact(client):
+                client.status = "ожидает почту"
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(EMAIL_QUESTION, delay=False),
+                now,
+            )
+        if asks_for_price_list(text) or (pending_price_list and _wants_price_list_in_chat(text)):
             client.price_list_requested = True
             return await self._finish(
                 client,
@@ -1372,16 +1401,6 @@ class ConversationService:
                     attachment_content=generated_price_list(),
                     attachment_filename=PRICE_LIST_FILENAME,
                 ),
-                now,
-            )
-        if asks_for_price_list(text):
-            client.price_list_requested = True
-            if client.name and not has_contact(client):
-                client.status = "ожидает почту"
-            return await self._finish(
-                client,
-                message.text,
-                BotReply(EMAIL_QUESTION, delay=False),
                 now,
             )
         if self._is_fulfillment_turn(client, text):

@@ -29,6 +29,37 @@ def now():
     return datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        "А прайс у вас есть?",
+        "Прайс можно?",
+        "прайс есть?",
+        "прайс можно?",
+    ],
+)
+@pytest.mark.asyncio
+async def test_availability_price_list_question_sends_chat_attachment_not_email(now, message_text):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(telegram_id=720, name="Сергей", phone="+799****4567")
+    )
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(720, None, message_text))
+    saved = await repository.get_client(720)
+
+    assert result.text == "Отправляю актуальный прайс прямо сюда."
+    assert result.attachment_content == generated_price_list()
+    assert result.attachment_filename == "stokozavr-price-list.md"
+    assert EMAIL_QUESTION not in result.text
+    assert "почт" not in result.text.lower()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+    assert result.attachment_content.count("SKU:") == 30
+    assert "-ALT-" not in result.attachment_content
+
+
 @pytest.mark.parametrize("message_text", ["Прайс в чат", "Пришлите прайс сюда", "Прайс в Telegram"])
 @pytest.mark.asyncio
 async def test_explicit_price_list_in_chat_returns_generated_attachment_without_email(
@@ -53,7 +84,7 @@ async def test_explicit_price_list_in_chat_returns_generated_attachment_without_
 
 @pytest.mark.parametrize("message_text", ["Давайте прайс", "Пришлите прайс", "Каталог"])
 @pytest.mark.asyncio
-async def test_plain_explicit_price_list_request_asks_email_without_attachment(now, message_text):
+async def test_plain_price_list_request_sends_chat_attachment_without_email(now, message_text):
     repository = InMemoryCRMRepository()
     await repository.save_client(ClientProfile(telegram_id=701, name="Анна", phone="+799****4567"))
     service = ConversationService(repository, NoAI(), clock=lambda: now)
@@ -61,9 +92,13 @@ async def test_plain_explicit_price_list_request_asks_email_without_attachment(n
     result = await service.handle(IncomingMessage(701, None, message_text))
     saved = await repository.get_client(701)
 
-    assert result.text == EMAIL_QUESTION
-    assert result.attachment_content is None
+    assert result.text == "Отправляю актуальный прайс прямо сюда."
+    assert result.attachment_content == generated_price_list()
+    assert result.attachment_filename == "stokozavr-price-list.md"
+    assert EMAIL_QUESTION not in result.text
+    assert "почт" not in result.text.lower()
     assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
 
 
 @pytest.mark.asyncio
@@ -141,13 +176,33 @@ async def test_normal_assortment_does_not_offer_or_attach_price_list(now):
     assert result.attachment_content is None
 
 
+@pytest.mark.parametrize(
+    "message_text",
+    ["прайс на почту", "Пришлите прайс на email", "вышлите прайс на почту"],
+)
+@pytest.mark.asyncio
+async def test_explicit_email_price_list_request_asks_email_without_attachment(now, message_text):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(ClientProfile(telegram_id=721, name="Анна", phone="+799****4567"))
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(721, None, message_text))
+    saved = await repository.get_client(721)
+
+    assert result.text == EMAIL_QUESTION
+    assert result.attachment_content is None
+    assert result.attachment_filename is None
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+
+
 @pytest.mark.asyncio
 async def test_email_after_plain_price_request_is_saved_and_does_not_claim_send(now):
     repository = InMemoryCRMRepository()
     await repository.save_client(ClientProfile(telegram_id=705, name="Анна"))
     service = ConversationService(repository, NoAI(), clock=lambda: now)
 
-    first = await service.handle(IncomingMessage(705, None, "Давайте прайс"))
+    first = await service.handle(IncomingMessage(705, None, "прайс на почту"))
     second = await service.handle(IncomingMessage(705, None, "anna@shop.ru"))
     saved = await repository.get_client(705)
 
@@ -166,7 +221,7 @@ async def test_chat_here_after_email_keeps_pending_and_sends_attachment(now):
     await repository.save_client(ClientProfile(telegram_id=708, name="Анна"))
     service = ConversationService(repository, NoAI(), clock=lambda: now)
 
-    await service.handle(IncomingMessage(708, None, "Давайте прайс"))
+    await service.handle(IncomingMessage(708, None, "прайс на почту"))
     await service.handle(IncomingMessage(708, None, "anna@shop.ru"))
     result = await service.handle(IncomingMessage(708, None, "а можно прямо в чат?"))
     saved = await repository.get_client(708)
@@ -190,7 +245,41 @@ async def test_chat_followup_recovers_pending_price_request_from_history(now):
     assert result.attachment_filename == "stokozavr-price-list.md"
 
 
-@pytest.mark.parametrize("message_text", ["прайс повторно не надо", "файл уже прислали"])
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        "на почту не надо, киньте в чат",
+        "прайс на почту не надо, киньте в чат",
+        "не на почту",
+        "в чат",
+        "сюда",
+        "Почту не дам, киньте в чат",
+    ],
+)
+@pytest.mark.asyncio
+async def test_after_email_question_chat_or_not_email_sends_file_not_cancel(now, message_text):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(telegram_id=722, name="Наталья", phone="+799****4567")
+    )
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(722, None, "прайс на почту"))
+    result = await service.handle(IncomingMessage(722, None, message_text))
+    saved = await repository.get_client(722)
+
+    assert first.text == EMAIL_QUESTION
+    assert result.text == "Отправляю актуальный прайс прямо сюда."
+    assert result.attachment_content == generated_price_list()
+    assert result.attachment_filename == "stokozavr-price-list.md"
+    assert "без прайса" not in result.text.lower()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+
+
+@pytest.mark.parametrize(
+    "message_text", ["прайс не надо", "прайс повторно не надо", "файл уже прислали"]
+)
 @pytest.mark.asyncio
 async def test_price_list_refusal_cancels_pending_without_new_request(now, message_text):
     repository = InMemoryCRMRepository()
