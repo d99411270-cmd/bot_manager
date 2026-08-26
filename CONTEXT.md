@@ -53,7 +53,13 @@
 
 ## Проверка
 
-- На 2026-08-26 (TDD slice G: два короба / консервы alias / канал звонка / PRODUCT после телефона, без push/deploy):
+- На 2026-08-26 (main `0d1e773` + живой rerun P1/P3/P6 на isolated Beget, без push/deploy):
+- `.venv/bin/pytest -q` — `430 passed`.
+- `ruff check .` / `ruff format --check .` / `git diff --check` — чисто.
+- Isolated smoke: `SMOKE=ok model=deepseek-v4-flash` на `/tmp/stokozavr-qa-round2`.
+- Live rerun `qa-dialogues/round-2b/`: P1 два короба = 1640; P3 «консервы какие?» → горошек/кукуруза; P6 `channel=call`, после мобильного CLOSE_ASK_TIME, не PRODUCT. Production `@Stokozavr_manager_bot` не менялся.
+
+Ранее на 2026-08-26 (TDD slice G: два короба / консервы alias / канал звонка / PRODUCT после телефона, без push/deploy):
 - `PYTHONPATH=src /home/hermes/projects/stokozavr-telegram-bot/.venv/bin/pytest -q` — `430 passed`.
 - `ruff check .` — `All checks passed!`
 - `ruff format --check .` — formatted; `git diff --check` без ошибок.
@@ -129,7 +135,7 @@
 
 ## Дальше
 
-Slices D/E/F слиты в main: pending прайса, видимые конкуренты, pickup≠call + handoff-порт. Slice G (worktree qa-slice-g) закрыл 4 живых корня round-2: pack-count из фразы, alias текущей темы, ownership канала звонка, не PRODUCT после мобильного при известном заказе. Осталось: подключение handoff к QA-стенду, живой amoCRM, name-frequency, живой rerun P1–P8.
+Slice G в main (`0d1e773`). Живой rerun P1/P3/P6 на isolated стенде зелёный. На Beget ещё старый Иван. Осталось: явный пуш/деплой, подключение handoff к стенду, живой amoCRM, name-frequency.
 
 Локально есть выдуманный тестовый каталог и tool-calling. Реальные коммерческие данные не добавлялись. На Beget ещё старый Иван.
 
