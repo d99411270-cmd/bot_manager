@@ -17,6 +17,7 @@ from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     UnitPriceQuote,
+    _all_records,
     catalog_categories_in_result,
     composite_line_total_catalog_result,
     generated_price_list,
@@ -944,19 +945,117 @@ def _repair_reply_is_grounded(reply: str, catalog_result: str) -> bool:
     return any(word in reply.lower() for word in catalog_words)
 
 
-_COMPETITOR_MENTION_RE = re.compile(r"конкурент\w*|сравн\w*|альтернатив\w*", re.IGNORECASE)
-_COMPETITOR_SAFE_REPLY = "Актуальную информацию уточню и вернусь к вам."
+def _price_token(price: str) -> str | None:
+    match = re.search(r"(\d[\d\s]*)(?:[.,]\d+)?\s*(?:₽|руб)", (price or "").lower())
+    if not match:
+        return None
+    return re.sub(r"\s+", "", match.group(1)).lstrip("0") or "0"
+
+
+def _competitor_price_sets() -> tuple[set[str], set[str]]:
+    primary: set[str] = set()
+    competitor: set[str] = set()
+    for record in _all_records():
+        token = _price_token(record.price)
+        if not token:
+            continue
+        if record.is_competitor:
+            competitor.add(token)
+        else:
+            primary.add(token)
+    return primary, competitor - primary
+
+
+def _text_has_price_amount(text: str, token: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(token)}\b\s*(?:₽|руб)", text, re.IGNORECASE))
+
+
+def _reply_shows_competitor(text: str) -> bool:
+    """True when the client can see a named competitor or a competitor-only price."""
+    lowered = text.lower()
+    _primary_prices, competitor_only = _competitor_price_sets()
+    for record in _all_records():
+        if not record.is_competitor:
+            continue
+        if record.manufacturer.lower() in lowered or record.sku.lower() in lowered:
+            return True
+        token = _price_token(record.price)
+        if token and token in competitor_only and _text_has_price_amount(text, token):
+            return True
+    return False
+
+
+def _line_has_primary_facts(text: str) -> bool:
+    lowered = text.lower()
+    primary_prices, competitor_only = _competitor_price_sets()
+    for record in _all_records():
+        if record.is_competitor:
+            continue
+        if record.manufacturer.lower() in lowered or record.sku.lower() in lowered:
+            return True
+        token = _price_token(record.price)
+        if (
+            token
+            and token in primary_prices
+            and token not in competitor_only
+            and _text_has_price_amount(text, token)
+        ):
+            return True
+    return False
+
+
+def _erase_competitor_tokens(text: str) -> str:
+    _primary_prices, competitor_only = _competitor_price_sets()
+    result = text
+    for record in _all_records():
+        if not record.is_competitor:
+            continue
+        result = re.sub(re.escape(record.manufacturer), "", result, flags=re.IGNORECASE)
+        result = re.sub(re.escape(record.sku), "", result, flags=re.IGNORECASE)
+        token = _price_token(record.price)
+        if token and token in competitor_only:
+            result = re.sub(
+                rf"\b{re.escape(token)}\b\s*(?:₽|руб\w*)",
+                "",
+                result,
+                flags=re.IGNORECASE,
+            )
+    result = re.sub(r"(?i)производитель\s*[—\-:]?\s*(?=[,;.]|$)", "", result)
+    result = re.sub(r"(?<!\d)\s*₽", "", result)
+    result = re.sub(r"\s{2,}", " ", result)
+    result = re.sub(r"\s+([,.;:])", r"\1", result)
+    result = re.sub(r"([,;:]){2,}", r"\1", result)
+    return result.strip(" ,;:-")
+
+
+def _strip_competitor_exposure(text: str) -> str:
+    """Remove visible competitor facts but keep grounded primary details."""
+    kept: list[str] = []
+    for line in text.splitlines():
+        if _reply_shows_competitor(line) and not _line_has_primary_facts(line):
+            continue
+        cleaned = _erase_competitor_tokens(line) if _reply_shows_competitor(line) else line
+        cleaned = cleaned.strip()
+        if cleaned and cleaned not in {"-", "—"}:
+            kept.append(cleaned)
+    return "\n".join(kept).strip()
 
 
 def limit_competitor_mentions(client: ClientProfile, text: str, *, allowed: bool = False) -> str:
-    """Allow explicitly requested alternatives at most twice, never consecutively."""
-    if _COMPETITOR_MENTION_RE.search(text):
-        if not allowed or client.competitor_mentions >= 2 or client.competitor_last_reply:
-            return _COMPETITOR_SAFE_REPLY
-        client.competitor_mentions += 1
-        client.competitor_last_reply = True
+    """Count visible competitor facts; at most two mentions, never consecutive.
+
+    Compare-language in a primary answer is not a mention. A named competitor
+    brand/SKU or a competitor-only price is. Blocked turns keep primary facts
+    instead of replacing the whole reply.
+    """
+    if not _reply_shows_competitor(text):
+        client.competitor_last_reply = False
         return text
-    client.competitor_last_reply = False
+    if not allowed or client.competitor_mentions >= 2 or client.competitor_last_reply:
+        client.competitor_last_reply = False
+        return _strip_competitor_exposure(text)
+    client.competitor_mentions += 1
+    client.competitor_last_reply = True
     return text
 
 
