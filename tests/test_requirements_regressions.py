@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage
+from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.product_catalog import parse_catalog_records, search
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import ConversationService
@@ -24,6 +24,46 @@ class FakeAI:
 
     async def respond(self, profile, history, message):
         return self.turns.pop(0) if self.turns else AiTurn(reply="ок")
+
+
+@pytest.mark.asyncio
+async def test_rice_price_per_kg_uses_current_product_and_never_general_fallback(now):
+    class UnitPriceAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="цена за кг риса — 85 ₽/кг")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(
+                intent="question", product="рис длиннозёрный", unit_price_request="кг"
+            )
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=906,
+            name="Иван",
+            phone="+799****0006",
+            product="бакалея",
+            current_interest="рис длиннозёрный",
+            volume="100 кг",
+            status="квалифицирован",
+        )
+    )
+    ai = UnitPriceAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(906, None, "можно цену за кг риса"))
+
+    assert "85 ₽/кг" in result.text
+    assert result.text != "Я уточню этот вопрос и вернусь к вам."
+    assert len(ai.catalog_calls) == 1
+    assert "GRC-RICE-001" in ai.catalog_calls[0]
+    assert "85 ₽/кг" in ai.catalog_calls[0]
 
 
 @pytest.mark.asyncio

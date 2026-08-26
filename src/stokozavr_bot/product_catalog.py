@@ -60,6 +60,14 @@ class CatalogRecord:
     for_sku: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class UnitPriceQuote:
+    record: CatalogRecord
+    unit: str
+    total_quantity: str
+    unit_price: str
+
+
 class _CatalogDir(Protocol):
     def iterdir(self): ...
 
@@ -162,6 +170,92 @@ def _all_records() -> list[CatalogRecord]:
     for _name, text in _load_catalog():
         records.extend(parse_catalog_records(text))
     return records
+
+
+def _parse_packaging_quantity(packaging: str) -> tuple[float, str] | None:
+    match = re.fullmatch(
+        r"\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(кг|г|л|мл|шт|штук)\s*",
+        packaging.lower(),
+    )
+    if not match:
+        return None
+    count, amount, unit = match.groups()
+    count_value = float(count.replace(",", "."))
+    amount_value = float(amount.replace(",", "."))
+    factors = {"г": (0.001, "кг"), "кг": (1, "кг"), "мл": (0.001, "л"), "л": (1, "л")}
+    if unit in factors:
+        factor, normalized = factors[unit]
+        return count_value * amount_value * factor, normalized
+    return count_value * amount_value, "шт"
+
+
+def _format_quantity(value: float, unit: str) -> str:
+    rendered = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{rendered} {unit}"
+
+
+def _price_amount(price: str) -> float | None:
+    match = re.search(r"(\d[\d\s]*(?:[.,]\d+)?)\s*(?:₽|руб)", price.lower())
+    if not match:
+        return None
+    return float(match.group(1).replace(" ", "").replace(",", "."))
+
+
+def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
+    """Calculate a unit price only from one confirmed primary catalog record."""
+    requested = {
+        "кг": "кг",
+        "килограмм": "кг",
+        "литр": "л",
+        "л": "л",
+        "штука": "шт",
+        "шт": "шт",
+    }.get(unit.strip().lower())
+    if requested is None:
+        return None
+    terms = [token for token in re.findall(r"[\w-]+", (product or "").lower()) if len(token) >= 3]
+    matches = [
+        (
+            sum(token in f"{record.category} {record.subcategory}".lower() for token in terms),
+            record,
+        )
+        for record in _all_records()
+        if not record.is_competitor
+    ]
+    matches = [(score, record) for score, record in matches if score]
+    if not matches:
+        return None
+    best_score = max(score for score, _record in matches)
+    candidates = [record for score, record in matches if score == best_score]
+    if len(candidates) != 1:
+        return None
+    parsed = _parse_packaging_quantity(candidates[0].packaging)
+    price = _price_amount(candidates[0].price)
+    if parsed is None or price is None or parsed[1] != requested or parsed[0] <= 0:
+        return None
+    total, normalized = parsed
+    return UnitPriceQuote(
+        record=candidates[0],
+        unit=normalized,
+        total_quantity=_format_quantity(total, normalized),
+        unit_price=f"{price / total:.2f}".rstrip("0").rstrip(".") + f" ₽/{normalized}",
+    )
+
+
+def unit_price_catalog_result(product: str, unit: str) -> tuple[str, UnitPriceQuote] | None:
+    quote = unit_price_quote(product, unit)
+    if quote is None:
+        return None
+    record = quote.record
+    raw = (
+        f"Категория: {record.category}; Подкатегория: {record.subcategory}; SKU: {record.sku}; "
+        f"Производитель: {record.manufacturer}; Фасовка: {record.packaging}; Цена: {record.price}; "
+        f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}"
+    )
+    return (
+        raw + f"; Подтверждённый расчёт: {quote.total_quantity} в упаковке; {quote.unit_price}",
+        quote,
+    )
 
 
 def _category_listing(files: list[tuple[str, str]]) -> str:

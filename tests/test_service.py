@@ -452,3 +452,36 @@ async def test_price_hesitation_keeps_known_volume_and_uses_catalog_grounded_ai(
     assert message == "Зависит от цены"
     assert "CAN-PEAS-001" in catalog_result
     assert "36 банок" not in result.text or "объём" not in result.text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phone", "wording"),
+    [("+7 999 123 45 6", "не хватает"), ("+7 999 123 45 678", "лишняя")],
+)
+async def test_invalid_russian_phone_length_is_not_saved_and_gets_direction(now, phone, wording):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=300, name="Анна", status="ожидает телефон"))
+    ai = FakeAI([AiTurn(reply="Кажется, в номере ошибка: пришлите ещё раз.")])
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(300, None, phone))
+    saved = await repo.get_client(300)
+
+    assert saved.phone is None
+    assert wording in result.text.lower() or "ошибка" in result.text.lower()
+    assert len(ai.calls) == 1
+    assert "invalid_phone_length" in ai.calls[0][2]
+
+
+@pytest.mark.asyncio
+async def test_valid_russian_phone_is_saved_and_advances_to_product(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=301, name="Анна", status="ожидает телефон"))
+    service = ConversationService(repo, FakeAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(301, None, "+7 999 123 45 67"))
+    saved = await repo.get_client(301)
+
+    assert saved.phone == "+79991234567"
+    assert "какая продукция" in result.text.lower()

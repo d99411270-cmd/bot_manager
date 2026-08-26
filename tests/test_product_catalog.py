@@ -7,9 +7,27 @@ from stokozavr_bot.product_catalog import (
     listed_price_amounts,
     listed_stock_amounts,
     search,
+    unit_price_quote,
 )
 
 REPO_CATALOG = Path(__file__).resolve().parents[1] / "catalog"
+
+
+def test_unit_price_quote_calculates_confirmed_rice_price_per_kg():
+    quote = unit_price_quote("рис длиннозёрный", "кг")
+
+    assert quote is not None
+    assert quote.unit_price == "85 ₽/кг"
+    assert quote.total_quantity == "8 кг"
+    assert quote.record.sku == "GRC-RICE-001"
+
+
+def test_unit_price_quote_calculates_liters_and_rejects_ambiguous_packaging():
+    liter_quote = unit_price_quote("сок яблочный", "л")
+    assert liter_quote is not None
+    assert liter_quote.unit_price == "148.33 ₽/л"
+
+    assert unit_price_quote("товар с неясной фасовкой", "кг") is None
 
 
 def test_search_conserves_returns_all_primary_positions_without_competitors():

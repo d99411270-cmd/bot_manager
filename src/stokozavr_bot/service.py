@@ -10,9 +10,11 @@ from .closing import PENZA_PROMO_AMOUNTS, closing_reply, looks_like_ready_to_buy
 from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
+    UnitPriceQuote,
     grounded_search_reply,
     infer_catalog_interest,
     search,
+    unit_price_catalog_result,
 )
 from .repositories import CRMRepository
 
@@ -225,6 +227,15 @@ def _catalog_supports_claim(reply: str, catalog_result: str | None) -> bool:
 
 def looks_like_volume(text: str) -> bool:
     return extract_volume(text) is not None and not asks_for_unverified_info(text)
+
+
+def invalid_phone_length(text: str) -> tuple[int, str] | None:
+    digits = re.sub(r"\D", "", text)
+    if not digits or len(digits) not in {10, 12}:
+        return None
+    if not re.search(r"(?:\+?7|8|9)", text.replace(" ", "")):
+        return None
+    return len(digits), "short" if len(digits) == 10 else "long"
 
 
 def extract_volume(text: str) -> str | None:
@@ -442,6 +453,36 @@ class ConversationService:
         text = message.text.strip()
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         semantic = await self._safe_analyze(client, history, message.text)
+        invalid_phone = invalid_phone_length(message.text)
+        if invalid_phone and semantic is not None:
+            semantic = IntakeAnalysis(
+                intent=semantic.intent,
+                name=semantic.name,
+                phone=None,
+                product=semantic.product,
+                volume=semantic.volume,
+                budget=semantic.budget,
+                unit_price_request=semantic.unit_price_request,
+                target_product=semantic.target_product,
+                invalid_phone_length=invalid_phone[0],
+                invalid_phone_direction=invalid_phone[1],
+                reply=semantic.reply,
+            )
+        if invalid_phone:
+            direction = invalid_phone[1]
+            signal = (
+                f"[STRUCTURED_SIGNAL invalid_phone_length={invalid_phone[0]} direction={direction}]"
+            )
+            turn = await self._safe_respond(client, history, f"{message.text} {signal}")
+            if turn and is_valid_ai_reply(turn.reply):
+                return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
+            wording = "не хватает цифры" if direction == "short" else "лишняя цифра"
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(f"Кажется, {wording}. Пришлите, пожалуйста, номер ещё раз."),
+                now,
+            )
         captured = self._apply_intake_facts(client, semantic, message.text)
         if semantic and semantic.budget is not None:
             client.budget = semantic.budget
@@ -486,6 +527,21 @@ class ConversationService:
             if _is_catalog_or_price_question(text)
             else None
         )
+        unit_quote = None
+        if semantic and semantic.unit_price_request:
+            target = (
+                semantic.target_product
+                or semantic.product
+                or client.current_interest
+                or client.product
+            )
+            if target:
+                client.current_interest = target[:300]
+                if has_contact(client):
+                    client.product = target[:300]
+                calculated = unit_price_catalog_result(target, semantic.unit_price_request)
+                if calculated:
+                    catalog_result, unit_quote = calculated
 
         catalog_empty_check = bool(
             client.product
@@ -506,7 +562,7 @@ class ConversationService:
         if is_qualified(client):
             client.status = "квалифицирован"
             await self.repository.save_client(client)
-            return await self._handle_ai(client, message.text, now, catalog_result)
+            return await self._handle_ai(client, message.text, now, catalog_result, unit_quote)
 
         if (
             captured
@@ -805,6 +861,7 @@ class ConversationService:
         user_message: str,
         now: datetime,
         catalog_result: str | None = None,
+        unit_quote: UnitPriceQuote | None = None,
     ) -> BotReply:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         turn = await self._safe_respond(client, history, user_message, catalog_result)
@@ -840,24 +897,53 @@ class ConversationService:
                     repair_reason or "not_grounded",
                     repair.needs_human,
                 )
-            catalog_reply = (
-                None
-                if rejection_reason in {"unsafe_reply", "invalid_reply"}
-                else grounded_search_reply(
-                    catalog_result or "",
-                    client.name,
-                    history[-1].assistant_message if history else None,
+            if _catalog_has_positions(catalog_result or ""):
+                recovery = await self._safe_repair(
+                    client, history, user_message, "recovery_attempt_2", catalog_result or ""
                 )
+                if (
+                    recovery
+                    and _ai_rejection_reason(recovery, catalog_result) is None
+                    and _repair_reply_is_grounded(recovery.reply, catalog_result or "")
+                ):
+                    return await self._finish(
+                        client, user_message, BotReply(recovery.reply.strip(), delay=False), now
+                    )
+                client.needs_human = True
+                client.pending_manager_question = user_message[:500]
+                if unit_quote:
+                    record = unit_quote.record
+                    reply = (
+                        f"{record.subcategory}: {unit_quote.unit_price} "
+                        f"({record.packaging}, {record.price} за упаковку)."
+                    )
+                    return await self._finish(client, user_message, BotReply(reply), now)
+                if not callable(
+                    getattr(self.ai, "repair_response", None)
+                ) and rejection_reason not in {"unsafe_reply", "invalid_reply"}:
+                    catalog_reply = grounded_search_reply(
+                        catalog_result or "",
+                        client.name,
+                        history[-1].assistant_message if history else None,
+                    )
+                    if catalog_reply:
+                        return await self._finish(
+                            client, user_message, BotReply(catalog_reply, delay=False), now
+                        )
+                if not callable(getattr(self.ai, "repair_response", None)):
+                    return await self._finish(client, user_message, BotReply(FALLBACK), now)
+                return await self._finish(
+                    client,
+                    user_message,
+                    BotReply("Сейчас не могу подтвердить ответ по этому вопросу по каталогу."),
+                    now,
+                )
+            reply = (
+                CATALOG_NO_MATCH_REPLY
+                if catalog_result and "CATALOG_RESULT_EMPTY" in catalog_result
+                else FALLBACK
             )
-            if catalog_reply:
-                reply = catalog_reply
-            else:
-                reply = (
-                    CATALOG_NO_MATCH_REPLY
-                    if catalog_result and "CATALOG_RESULT_EMPTY" in catalog_result
-                    else FALLBACK
-                )
-                client.comment = "Нужен ответ менеджера"
+            client.comment = "Нужен ответ менеджера"
             return await self._finish(client, user_message, BotReply(reply, delay=False), now)
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now

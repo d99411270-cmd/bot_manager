@@ -26,6 +26,7 @@ class ClientProfile:
     original_interests: list[str] | None = None
     current_interest: str | None = None
     needs_human: bool = False
+    pending_manager_question: str | None = None
     competitor_mentions: int = 0
     competitor_last_reply: bool = False
 
@@ -69,6 +70,10 @@ class IntakeAnalysis:
     product: str | None = None
     volume: str | None = None
     budget: int | None = None
+    unit_price_request: str | None = None
+    target_product: str | None = None
+    invalid_phone_length: int | None = None
+    invalid_phone_direction: str | None = None
     reply: str | None = None
 
 
