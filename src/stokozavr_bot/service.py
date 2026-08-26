@@ -204,6 +204,63 @@ def _normalize_utterance(text: str) -> str:
     return re.sub(r"[^а-яёa-z0-9]+", " ", (text or "").lower()).strip().replace("ё", "е")
 
 
+_CLIENT_TYPE_WORDS = frozenset(
+    {
+        "магазин",
+        "магазина",
+        "магазине",
+        "кафе",
+        "ресторан",
+        "ресторана",
+        "ресторане",
+        "столовая",
+        "столовой",
+        "столовую",
+        "сеть",
+        "сети",
+    }
+)
+_CLIENT_TYPE_FILLERS = frozenset({"у", "меня", "нас", "это", "из", "мы", "я", "наш", "наша"})
+
+
+def _asked_occupation(question: str | None) -> bool:
+    """True when Ivan asked what the client does / shop-or-cafe."""
+    if not question:
+        return False
+    return bool(
+        re.search(
+            r"чем занимаетесь|магазин или кафе|кафе или ресторан|"
+            r"какая у вас точка|какой у вас бизнес|вы магазин|вы кафе",
+            question.lower(),
+        )
+    )
+
+
+def _is_client_type_answer(text: str) -> bool:
+    """Standalone business-type reply, not an SKU name."""
+    normalized = _normalize_utterance(text)
+    if not normalized:
+        return False
+    if normalized in _CLIENT_TYPE_WORDS:
+        return True
+    core = [token for token in normalized.split() if token not in _CLIENT_TYPE_FILLERS]
+    return bool(core) and all(token in _CLIENT_TYPE_WORDS for token in core)
+
+
+def _is_occupation_client_type(
+    text: str,
+    semantic: IntakeAnalysis | None,
+    last_question: str | None,
+) -> bool:
+    """Client-type words after we asked occupation are not catalog queries."""
+    if not _asked_occupation(last_question):
+        return False
+    semantic_product = semantic.product.strip() if semantic and semantic.product else ""
+    return _is_client_type_answer(text) or bool(
+        semantic_product and _is_client_type_answer(semantic_product)
+    )
+
+
 def _is_broad_assortment_utterance(text: str) -> bool:
     """«Вся/все/всё что есть» is assortment browse, not an SKU."""
     return _normalize_utterance(text) in _BROAD_ASSORTMENT_PHRASES
@@ -656,13 +713,16 @@ def _asks_about_delivery(text: str) -> bool:
 def extract_volume(text: str) -> str | None:
     match = re.search(
         r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
-        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|сет(?:ок|к\w*)|шт\.?|штук\w*|литр\w*|"
+        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|сет(?:ок|к\w*)|мешк\w*|шт\.?|штук\w*|литр\w*|"
         r"г(?:р(?:амм\w*)?)?\.?|грамм\w*)|(?:литр\w*|килограмм\w*)\s+\d+(?:[.,]\d+)?",
         text.lower(),
     )
-    if not match:
-        return None
-    return text[match.start() : match.end()].strip()
+    if match:
+        return text[match.start() : match.end()].strip()
+    parsed = parse_requested_quantity(text)
+    if parsed:
+        return parsed.raw
+    return None
 
 
 def _looks_like_packaging_fragment(text: str) -> bool:
@@ -797,7 +857,76 @@ def _reject_turn(
             return "invalid_reply"
     if _catalog_has_positions(catalog_result or "") and "не могу подтвердить" in turn.reply.lower():
         return "invalid_reply"
+    if client.requested_slot and re.search(r"во сколько", turn.reply.lower()):
+        return "invalid_reply"
+    totals = _confirmed_calculation_totals(catalog_result)
+    if totals:
+        compact = re.sub(r"\s+", "", turn.reply)
+        if not any(token in compact for token in totals):
+            return "invalid_reply"
     return None
+
+
+def _confirmed_calculation_totals(catalog_result: str | None) -> set[str]:
+    """Order totals from structured quote, not the pack price sitting in Цена."""
+    if not catalog_result:
+        return set()
+    totals: set[str] = set()
+    for chunk in re.findall(r"Подтверждённый расчёт:\s*([^;]+)", catalog_result, re.IGNORECASE):
+        for raw in re.findall(r"(\d[\d\s]*)\s*₽", chunk):
+            token = re.sub(r"\s+", "", raw)
+            if token:
+                totals.add(token)
+    return totals
+
+
+def _quote_total_tokens(quote: LineTotalQuote | NearestPackQuote) -> set[str]:
+    tokens: set[str] = set()
+    if isinstance(quote, NearestPackQuote):
+        for side in (quote.lower, quote.upper):
+            if side:
+                tokens.add(re.sub(r"\D", "", side.total))
+    else:
+        tokens.add(re.sub(r"\D", "", quote.total))
+    return {token for token in tokens if token}
+
+
+def _reply_includes_quote_amounts(
+    reply: str, quote: LineTotalQuote | NearestPackQuote | None
+) -> bool:
+    if quote is None:
+        return True
+    compact = re.sub(r"\s+", "", reply)
+    return any(token in compact for token in _quote_total_tokens(quote))
+
+
+def _asks_about_confirmed_total(text: str) -> bool:
+    return bool(
+        re.search(r"итого|это\s+\d+|сколько это|сумм|\d+\s*(?:₽|руб)", (text or "").lower())
+    )
+
+
+def _is_quantity_only_phrase(text: str) -> bool:
+    parsed = parse_requested_quantity(text)
+    if parsed is None:
+        return False
+    leftover = re.sub(re.escape(parsed.raw), " ", (text or ""), flags=re.IGNORECASE)
+    leftover = re.sub(r"[^а-яёa-z0-9]+", " ", leftover.lower()).strip()
+    skip = {
+        "это",
+        "надо",
+        "нужно",
+        "берите",
+        "бери",
+        "да",
+        "ок",
+        "итого",
+        "сколько",
+        "сумма",
+        "сумму",
+    }
+    tokens = [token for token in leftover.split() if token not in skip and not token.isdigit()]
+    return not _product_terms(" ".join(tokens))
 
 
 def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> str:
@@ -876,17 +1005,25 @@ def _resolve_line_total_catalog(
     semantic: IntakeAnalysis | None,
     client: ClientProfile,
     catalog_query: str | None = None,
+    history: list[HistoryEntry] | None = None,
 ) -> tuple[str, LineTotalQuote | NearestPackQuote] | None:
     quantity = _requested_quote_quantity(text, semantic, client)
     if quantity is None:
         return None
+    recovered = None
+    if history:
+        recovered = recover_product_from_history(
+            "\n".join(f"{row.user_message}\n{row.assistant_message}" for row in history)
+        )
+    text_as_product = None if _is_quantity_only_phrase(text) else text
     seen: set[str] = set()
     for target in (
-        text,
+        text_as_product,
         _utterance_search_key(text),
         semantic.target_product if semantic else None,
         semantic.product if semantic else None,
         catalog_query,
+        recovered,
         client.current_interest,
         client.product,
     ):
@@ -1035,6 +1172,7 @@ def _intake_exception_product_query(client: ClientProfile, text: str) -> str | N
         or extract_volume(text)
         or asks_about_manufacturer(text)
         or _is_non_product_intake_text(text)
+        or _is_client_type_answer(text)
     ):
         return None
     return text.strip()
@@ -1146,12 +1284,15 @@ def resolve_catalog_query(
     text: str,
     semantic: IntakeAnalysis | None,
     client: ClientProfile,
+    last_question: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Choose the catalog search key: current utterance > same-entity sticky > interest.
 
     The second value is the owner: utterance, semantic, sticky, interest, or None.
     Sticky no-match is only recorded for a newly named unknown entity.
     """
+    if _is_client_type_answer(text) or _is_occupation_client_type(text, semantic, last_question):
+        return None, None
     if _is_broad_assortment_utterance(text):
         return "", "assortment"
     utterance = _utterance_search_key(text)
@@ -1159,7 +1300,8 @@ def resolve_catalog_query(
         return utterance, "utterance"
     semantic_product = semantic.product.strip() if semantic and semantic.product else None
     if semantic_product and (
-        _is_referential_followup(semantic_product)
+        _is_client_type_answer(semantic_product)
+        or _is_referential_followup(semantic_product)
         or _is_broad_assortment_utterance(semantic_product)
     ):
         semantic_product = None
@@ -1553,7 +1695,12 @@ class ConversationService:
                 BotReply(f"Кажется, {wording}. Пришлите, пожалуйста, номер ещё раз."),
                 now,
             )
-        catalog_query, query_owner = resolve_catalog_query(text, semantic, client)
+        catalog_query, query_owner = resolve_catalog_query(
+            text,
+            semantic,
+            client,
+            last_question=history[-1].assistant_message if history else None,
+        )
         preliminary_catalog_result = None
         catalog_no_match = False
         if catalog_query is not None:
@@ -1686,7 +1833,9 @@ class ConversationService:
 
         line_quote = None
         if unit_quote is None and composite_quote is None:
-            calculated_line = _resolve_line_total_catalog(text, semantic, client, catalog_query)
+            calculated_line = _resolve_line_total_catalog(
+                text, semantic, client, catalog_query, history
+            )
             if calculated_line:
                 catalog_result, line_quote = calculated_line
                 client.current_interest = line_quote.record.subcategory[:300]
@@ -1759,6 +1908,13 @@ class ConversationService:
         turn = await self._safe_respond(client, history, message.text, catalog_result)
         rejection_reason = _reject_turn(turn, catalog_result, client)
         if (unit_quote or line_quote) and turn and _is_generic_fallback_reply(turn.reply):
+            rejection_reason = "invalid_reply"
+        if (
+            line_quote
+            and turn
+            and rejection_reason is None
+            and not _reply_includes_quote_amounts(turn.reply, line_quote)
+        ):
             rejection_reason = "invalid_reply"
         if rejection_reason is None and turn is not None:
             self._remember_catalog_interest(client, catalog_result, turn.reply, message.text)
@@ -1957,6 +2113,8 @@ class ConversationService:
             and semantic.product
             and not _is_broad_assortment_utterance(semantic.product)
             and not _is_broad_assortment_utterance(text)
+            and not _is_client_type_answer(semantic.product)
+            and not _is_client_type_answer(text)
         ):
             if client.product and client.product != semantic.product:
                 client.original_interests = list(client.original_interests or [client.product])
@@ -2107,6 +2265,8 @@ class ConversationService:
 
     @staticmethod
     def _is_fulfillment_turn(client: ClientProfile, text: str) -> bool:
+        if client.requested_slot and _asks_about_confirmed_total(text):
+            return False
         if looks_like_pickup_choice(text) or looks_like_pickup_question(text):
             return True
         if looks_like_call_request(text):
@@ -2221,6 +2381,13 @@ class ConversationService:
             self._remember_catalog_interest(client, catalog_result, turn.reply, user_message)
         rejection_reason = _reject_turn(turn, catalog_result, client)
         if (unit_quote or line_quote) and turn and _is_generic_fallback_reply(turn.reply):
+            rejection_reason = "invalid_reply"
+        if (
+            line_quote
+            and turn
+            and rejection_reason is None
+            and not _reply_includes_quote_amounts(turn.reply, line_quote)
+        ):
             rejection_reason = "invalid_reply"
         if rejection_reason is not None:
             if (
