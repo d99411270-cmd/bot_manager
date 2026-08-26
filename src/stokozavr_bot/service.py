@@ -211,9 +211,9 @@ def _composite_order_catalog(text: str) -> str | None:
 
 def _deterministic_recovery_reply(text: str, catalog_result: str) -> str | None:
     lowered = text.strip().lower()
-    if re.search(r"закаж\w*|заказ\s+можно", lowered):
+    if re.search(r"закаж\w*|заказ\w*\s+можно", lowered):
         return "Да, заказать можно. Уточним, какой объём или фасовку нужно добавить к заказу?"
-    if lowered in {"что?", "и что дальше?", "не понял", "не поняла"}:
+    if lowered in {"что?", "что дальше?", "и что дальше?", "не понял", "не поняла"}:
         return "Да, продолжим. Я могу помочь собрать заказ; что уточним первым?"
     calculation = re.search(
         r"Подтверждённый расчёт:\s*([^;]+);\s*(\d[\d\s]*)\s*₽\s*за картофель",
@@ -395,6 +395,8 @@ def _ai_rejection_reason(turn: AiTurn | None, catalog_result: str | None = None)
         return "exception"
     if turn.needs_human:
         return "needs_human"
+    if _is_generic_fallback_reply(turn.reply):
+        return "invalid_reply"
     if (
         catalog_result
         and "CATALOG_RESULT_EMPTY" in catalog_result
@@ -1100,7 +1102,14 @@ class ConversationService:
                             client, user_message, BotReply(catalog_reply, delay=False), now
                         )
                 if not callable(getattr(self.ai, "repair_response", None)):
-                    return await self._finish(client, user_message, BotReply(FALLBACK), now)
+                    return await self._finish(
+                        client,
+                        user_message,
+                        BotReply(
+                            "Сейчас не могу подтвердить этот факт; вопрос зафиксирован для менеджера."
+                        ),
+                        now,
+                    )
                 return await self._finish(
                     client,
                     user_message,
@@ -1110,9 +1119,11 @@ class ConversationService:
             reply = (
                 CATALOG_NO_MATCH_REPLY
                 if catalog_result and "CATALOG_RESULT_EMPTY" in catalog_result
-                else FALLBACK
+                else "Сейчас не могу подтвердить этот факт; вопрос зафиксирован для менеджера."
             )
             client.comment = "Нужен ответ менеджера"
+            client.needs_human = True
+            client.pending_manager_question = user_message[:500]
             return await self._finish(client, user_message, BotReply(reply, delay=False), now)
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now

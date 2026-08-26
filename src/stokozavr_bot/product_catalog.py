@@ -247,11 +247,13 @@ def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
         total, normalized = piece_count, "шт"
     elif normalized != requested:
         return None
+    amount = price / total
+    rendered_price = f"{amount:.2f}" if amount % 1 else f"{amount:.0f}"
     return UnitPriceQuote(
         record=candidates[0],
         unit=normalized,
         total_quantity=_format_quantity(total, normalized),
-        unit_price=f"{price / total:.2f}".rstrip("0").rstrip(".") + f" ₽/{normalized}",
+        unit_price=rendered_price + f" ₽/{normalized}",
     )
 
 

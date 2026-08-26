@@ -197,7 +197,7 @@ async def test_ai_reply_with_two_questions_is_replaced_safely(now):
 
     result = await service.handle(IncomingMessage(16, None, "Что дальше?"))
 
-    assert result.text == "Я уточню этот вопрос и вернусь к вам."
+    assert "продолжим" in result.text.lower()
     assert result.text.count("?") <= 1
     assert result.delay is False
 

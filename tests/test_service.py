@@ -120,7 +120,7 @@ async def test_unsafe_price_or_stock_claim_is_replaced(now, unsafe):
 
     result = await service.handle(IncomingMessage(1, None, "Сколько стоит и есть ли на складе?"))
 
-    assert result.text == "Я уточню этот вопрос и вернусь к вам."
+    assert "зафиксирован" in result.text.lower()
     assert result.delay is False
 
 
@@ -247,7 +247,7 @@ async def test_exact_stock_count_is_blocked(now):
     result = await service.handle(IncomingMessage(1, None, "Сколько картофеля есть?"))
 
     assert "40 сеток" not in result.text
-    assert "уточню этот вопрос" in result.text.lower() or "750" in result.text
+    assert "зафиксирован" in result.text.lower() or "750" in result.text
 
 
 @pytest.mark.asyncio
