@@ -19,6 +19,32 @@ _FILENAME_ALIASES = {
     "maslo": ("масло", "масла"),
 }
 
+# Customer wording is normalized here, before matching catalog records.  Keep
+# the map focused on product/category vocabulary: DeepSeek still interprets
+# intent and receives the original message unchanged.
+_QUERY_ALIASES = {
+    "консервы": "консервация",
+    "консерв": "консервация",
+    "консервации": "консервация",
+    "консервацию": "консервация",
+    "консервацией": "консервация",
+    "горошек": "горошек зелёный",
+    "горошка": "горошек зелёный",
+    "кукуруза": "кукуруза сладкая",
+    "кукурузы": "кукуруза сладкая",
+    "огурец": "огурцы маринованные",
+    "огурцы": "огурцы маринованные",
+    "огурцов": "огурцы маринованные",
+    "огурцами": "огурцы маринованные",
+}
+_CATEGORY_PREFIX_ALIASES = {
+    "фрукт": "фрукты",
+    "овощ": "овощи",
+    "бакале": "бакалея",
+    "напит": "напитки",
+    "макарон": "макароны",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CatalogRecord:
@@ -145,6 +171,32 @@ def _category_listing(files: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for token in re.findall(r"[\w-]+", query.lower(), flags=re.UNICODE):
+        if len(token) < 3 or re.search(r"подешев|вариант|сравн|конкур", token):
+            continue
+        canonical = _QUERY_ALIASES.get(token)
+        if canonical is None:
+            canonical = next(
+                (
+                    value
+                    for prefix, value in _CATEGORY_PREFIX_ALIASES.items()
+                    if token.startswith(prefix)
+                ),
+                token,
+            )
+            candidates = (canonical,)
+        else:
+            # Keep the literal term too, so an existing exact product search
+            # remains broad when a colloquial alias is ambiguous (e.g. огурцы).
+            candidates = (token, canonical)
+        for term in candidates:
+            if term not in terms:
+                terms.append(term)
+    return terms
+
+
 def search(query: str) -> str:
     files = _load_catalog()
     if not files:
@@ -154,11 +206,7 @@ def search(query: str) -> str:
         return _category_listing(files)
     records = _all_records()
 
-    tokens = [
-        token
-        for token in re.split(r"\s+", cleaned)
-        if len(token) >= 3 and not re.search(r"подешев|вариант|сравн|конкур", token)
-    ]
+    tokens = _query_terms(cleaned)
 
     def matches(record: CatalogRecord) -> bool:
         haystack = (

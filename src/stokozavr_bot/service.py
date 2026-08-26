@@ -22,6 +22,7 @@ START_TEXT = (
     "Подскажите, пожалуйста, как я могу к вам обращаться?"
 )
 FALLBACK = "Я уточню этот вопрос и вернусь к вам."
+CATALOG_NO_MATCH_REPLY = "Подходящих товаров по этому запросу сейчас нет."
 PRODUCT_QUESTION = "Подскажите, какая продукция вас сейчас интересует?"
 PRODUCT_ASSORTMENT = (
     "В Стокозавре представлены основные категории продуктов для оптовых закупок: "
@@ -293,11 +294,23 @@ def is_valid_ai_reply(text: str, catalog_result: str | None = None) -> bool:
     )
 
 
+def _is_honest_no_match(reply: str) -> bool:
+    lowered = reply.lower()
+    return bool(re.search(r"нет|не найден|отсутств\w*|подходящ\w* товар\w*", lowered))
+
+
 def _ai_rejection_reason(turn: AiTurn | None, catalog_result: str | None = None) -> str | None:
     if turn is None:
         return "exception"
     if turn.needs_human:
         return "needs_human"
+    if (
+        catalog_result
+        and "CATALOG_RESULT_EMPTY" in catalog_result
+        and not _catalog_has_positions(catalog_result)
+        and not _is_honest_no_match(turn.reply)
+    ):
+        return "invalid_reply"
     if not turn.reply or is_unsafe_claim(turn.reply, catalog_result):
         return "unsafe_reply" if is_unsafe_claim(turn.reply, catalog_result) else "invalid_reply"
     if not is_valid_ai_reply(turn.reply, catalog_result):
@@ -472,6 +485,22 @@ class ConversationService:
             if _is_catalog_or_price_question(text)
             else None
         )
+
+        catalog_empty_check = bool(
+            client.product
+            and catalog_result
+            and not _catalog_has_positions(catalog_result)
+            and (
+                asks_about_assortment(text)
+                or bool(re.search(r"\b(?:какой|какая|какие|какое)\b.{0,30}\bесть\b", text.lower()))
+            )
+        )
+        if catalog_empty_check:
+            catalog_result = (
+                "CATALOG_RESULT_EMPTY: deterministic search found no matching positions. "
+                "Check the customer's meaning against the available categories; do not invent "
+                "products, prices, or availability.\n" + (catalog_result or "")
+            )
 
         if is_qualified(client):
             client.status = "квалифицирован"
@@ -819,7 +848,11 @@ class ConversationService:
             if catalog_reply:
                 reply = catalog_reply
             else:
-                reply = FALLBACK
+                reply = (
+                    CATALOG_NO_MATCH_REPLY
+                    if catalog_result and "CATALOG_RESULT_EMPTY" in catalog_result
+                    else FALLBACK
+                )
                 client.comment = "Нужен ответ менеджера"
             return await self._finish(client, user_message, BotReply(reply, delay=False), now)
         return await self._finish(

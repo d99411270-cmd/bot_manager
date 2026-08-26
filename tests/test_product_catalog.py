@@ -12,6 +12,55 @@ from stokozavr_bot.product_catalog import (
 REPO_CATALOG = Path(__file__).resolve().parents[1] / "catalog"
 
 
+def test_search_conserves_returns_all_primary_positions_without_competitors():
+    result = search("консервы")
+
+    assert result.count("SKU:") == 5
+    assert all(
+        sku in result
+        for sku in (
+            "CAN-PEAS-001",
+            "CAN-CORN-001",
+            "CAN-BEAN-001",
+            "CAN-PICKLES-001",
+            "CAN-TOMATO-001",
+        )
+    )
+    assert "-ALT-" not in result
+    assert "Урожайная Кладовая" not in result
+
+
+def test_search_question_about_conserves_returns_all_primary_positions():
+    result = search("какие консервы")
+
+    assert result.count("SKU:") == 5
+    assert "CAN-PEAS-001" in result
+    assert "CAN-TOMATO-001" in result
+    assert "-ALT-" not in result
+
+
+def test_search_product_synonym_peas_returns_primary_position_only():
+    result = search("горошек")
+
+    assert "CAN-PEAS-001" in result
+    assert "CAN-PEAS-ALT-001" not in result
+    assert "Урожайная Кладовая" not in result
+
+
+def test_search_product_synonym_corn_returns_sweet_corn_position():
+    result = search("кукурузы")
+
+    assert "CAN-CORN-001" in result
+    assert "CAN-CORN-ALT-001" not in result
+
+
+def test_search_inflected_conservation_category_returns_all_positions():
+    result = search("консервации")
+
+    assert result.count("SKU:") == 5
+    assert "CAN-BEAN-001" in result
+
+
 def test_search_fruits_returns_apples_and_bananas():
     result = search("фрукты")
 

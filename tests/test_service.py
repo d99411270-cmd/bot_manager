@@ -280,6 +280,65 @@ async def test_invalid_repair_with_empty_catalog_cannot_invent_price(now, monkey
     assert ai.repair_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_empty_catalog_search_sends_semantic_catalog_check_and_accepts_no_match(now):
+    class CatalogCheckAI(FakeAI):
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.calls.append((profile, history, message, catalog_result))
+            assert "CATALOG_RESULT_EMPTY" in catalog_result
+            assert "Доступные категории:" in catalog_result
+            return AiTurn(reply="Подходящих товаров по этому запросу сейчас нет.")
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=66,
+            name="Ирина",
+            phone="+799****0066",
+            product="молоко",
+            status="уточнение продукта",
+        )
+    )
+    ai = CatalogCheckAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(66, None, "Какое молоко есть?"))
+
+    assert "подходящих товаров" in result.text.lower()
+    assert "цена" not in result.text.lower()
+    assert "в наличии" not in result.text.lower()
+    assert len(ai.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_conserves_profile_passes_normalized_catalog_to_deepseek_without_volume_question(now):
+    class CatalogAI(FakeAI):
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.calls.append((profile, history, message, catalog_result))
+            assert "CAN-PEAS-001" in catalog_result
+            assert "CAN-TOMATO-001" in catalog_result
+            return AiTurn(reply="В каталоге есть горошек зелёный и кукуруза сладкая.")
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=67,
+            name="Ирина",
+            phone="+799****0067",
+            product="консервы",
+            status="уточнение объёма",
+        )
+    )
+    ai = CatalogAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(67, None, "Какие консервы?"))
+
+    assert "горошек" in result.text.lower()
+    assert "объём продукции вам необходим" not in result.text.lower()
+    assert len(ai.calls) == 1
+
+
 async def test_ai_gets_profile_and_recent_history_only(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(
