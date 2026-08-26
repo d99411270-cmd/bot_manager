@@ -34,6 +34,9 @@ class ClientProfile:
     price_list_requested: bool = False
     price_list_sent_at: datetime | None = None
     catalog_no_match_query: str | None = None
+    fulfillment_channel: str | None = None
+    requested_slot: str | None = None
+    handoff_id: str | None = None
 
 
 @dataclass(slots=True)

@@ -12,6 +12,16 @@ CLOSE_ASK_TIME = "Отлично. Чтобы оформить заказ, нуж
 PENZA_DELIVERY_PROMO = "Если заказ от 50 000 ₽, доставка по Пензе бесплатная."
 PENZA_PROMO_AMOUNTS = {"50000"}
 
+CHANNEL_CALL = "call"
+CHANNEL_PICKUP = "pickup"
+PICKUP_ADDRESS = "г. Пенза, ул. Аустрина, 137, корп. 2"
+CLOSE_CONFIRM_PICKUP = f"Самовывоз есть: {PICKUP_ADDRESS}. Во сколько вам удобно приехать?"
+CLOSE_PICKUP_INFO = (
+    f"Самовывоз есть, адрес: {PICKUP_ADDRESS}. "
+    "Подтверждённого окна на завтра нет — напишите удобное время визита."
+)
+CLOSE_ASK_CHANNEL = "Оставим самовывоз или лучше короткий звонок? Напишите, что удобнее."
+
 
 def looks_like_ready_to_buy(text: str) -> bool:
     lowered = text.strip().lower()
@@ -35,9 +45,66 @@ def looks_like_call_time(text: str) -> bool:
     )
 
 
+def looks_like_pickup_question(text: str) -> bool:
+    lowered = text.strip().lower()
+    if "самовывоз" not in lowered:
+        return False
+    return bool(re.search(r"\?|\bесть\b|\bможно\b", lowered))
+
+
+def looks_like_pickup_choice(text: str) -> bool:
+    lowered = text.strip().lower()
+    if looks_like_pickup_question(text):
+        return False
+    return bool(re.search(r"самовывоз|заберу сам|сам заберу|приеду сам", lowered))
+
+
+def looks_like_call_request(text: str) -> bool:
+    lowered = text.strip().lower()
+    return bool(re.search(r"\b(?:звоните|позвоните|перезвоните|созвон(?:имся)?)\b", lowered))
+
+
+def parse_time_slot(text: str) -> str | None:
+    lowered = text.lower().replace("ё", "е")
+    match = re.search(r"\b(\d{1,2})\s*:\s*(\d{2})\b", lowered)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    match = re.search(r"(?:часов?\s+в|в\s+|после\s+)(\d{1,2})\b", lowered)
+    if match:
+        hour = int(match.group(1))
+        if 0 <= hour <= 23:
+            return f"{hour:02d}:00"
+    return None
+
+
 def closing_reply(client: ClientProfile, user_text: str) -> str | None:
     if not looks_like_ready_to_buy(user_text):
         return None
     if not client.phone:
         return CLOSE_NEED_PHONE
     return CLOSE_ASK_TIME
+
+
+def pickup_info_reply() -> str:
+    return CLOSE_PICKUP_INFO
+
+
+def pickup_choice_reply() -> str:
+    return CLOSE_CONFIRM_PICKUP
+
+
+def visit_slot_reply(slot: str) -> str:
+    return f"Хорошо, жду вас в {slot} по адресу {PICKUP_ADDRESS}."
+
+
+def channel_clarify_reply() -> str:
+    return CLOSE_ASK_CHANNEL
+
+
+def call_slot_reply(slot: str, *, handoff_id: str | None) -> str:
+    if handoff_id:
+        return f"Договорились, позвоним в {slot}."
+    return f"Записал удобное время: {slot}."

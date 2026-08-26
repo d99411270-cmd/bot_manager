@@ -12,8 +12,27 @@ from .catalog_quotes import (
     _product_terms,
     parse_requested_quantity,
 )
-from .closing import PENZA_PROMO_AMOUNTS, closing_reply, looks_like_ready_to_buy
+from .closing import (
+    CHANNEL_CALL,
+    CHANNEL_PICKUP,
+    CLOSE_ASK_TIME,
+    CLOSE_NEED_PHONE,
+    PENZA_PROMO_AMOUNTS,
+    call_slot_reply,
+    channel_clarify_reply,
+    closing_reply,
+    looks_like_call_request,
+    looks_like_call_time,
+    looks_like_pickup_choice,
+    looks_like_pickup_question,
+    looks_like_ready_to_buy,
+    parse_time_slot,
+    pickup_choice_reply,
+    pickup_info_reply,
+    visit_slot_reply,
+)
 from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
+from .handoff import ManagerHandoff
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     UnitPriceQuote,
@@ -1080,12 +1099,14 @@ class ConversationService:
         history_limit: int = 10,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         followup_delay: timedelta = FOLLOWUP_DELAY,
+        handoff: ManagerHandoff | None = None,
     ) -> None:
         self.repository = repository
         self.ai = ai
         self.history_limit = history_limit
         self.clock = clock
         self.followup_delay = followup_delay
+        self.handoff = handoff
 
     @staticmethod
     def should_use_ai(client: ClientProfile | None, text: str) -> bool:
@@ -1190,6 +1211,10 @@ class ConversationService:
                 client.phone_correction_pending = False
                 client.phone = deterministic_phone
                 client.contact_skipped = False
+                if client.status == "готов к заказу":
+                    if not client.fulfillment_channel:
+                        client.fulfillment_channel = CHANNEL_CALL
+                    return await self._finish(client, message.text, BotReply(CLOSE_ASK_TIME), now)
                 client.status = "уточнение продукта"
                 return await self._finish(
                     client,
@@ -1253,6 +1278,8 @@ class ConversationService:
                 now,
                 add_price_list_offer=False,
             )
+        if self._is_fulfillment_turn(client, text):
+            return await self._handle_fulfillment(client, text, now)
         semantic = await self._safe_analyze(client, history, message.text)
         invalid_phone = invalid_phone_length(message.text)
         if invalid_phone and semantic is not None:
@@ -1451,7 +1478,8 @@ class ConversationService:
             return await self._handle_ai(client, message.text, now, catalog_result)
 
         if is_qualified(client):
-            client.status = "квалифицирован"
+            if client.status not in {"готов к заказу", "получил предложение"}:
+                client.status = "квалифицирован"
             await self.repository.save_client(client)
             return await self._handle_ai(
                 client,
@@ -1823,6 +1851,71 @@ class ConversationService:
             reply = BotReply(returning_greeting(client))
         return await self._finish(client, user_message, reply, now)
 
+    @staticmethod
+    def _is_fulfillment_turn(client: ClientProfile, text: str) -> bool:
+        if looks_like_pickup_choice(text) or looks_like_pickup_question(text):
+            return True
+        if looks_like_call_request(text):
+            return True
+        closing = client.status == "готов к заказу" or bool(client.fulfillment_channel)
+        return closing and bool(parse_time_slot(text) or looks_like_call_time(text))
+
+    async def _handle_fulfillment(
+        self, client: ClientProfile, user_message: str, now: datetime
+    ) -> BotReply:
+        text = user_message.strip()
+        if looks_like_pickup_question(text):
+            return await self._finish(client, user_message, BotReply(pickup_info_reply()), now)
+        if looks_like_pickup_choice(text):
+            client.fulfillment_channel = CHANNEL_PICKUP
+            client.status = "готов к заказу"
+            return await self._finish(client, user_message, BotReply(pickup_choice_reply()), now)
+        if client.fulfillment_channel == CHANNEL_PICKUP and looks_like_call_request(text):
+            return await self._finish(client, user_message, BotReply(channel_clarify_reply()), now)
+        slot = parse_time_slot(text)
+        if client.fulfillment_channel == CHANNEL_PICKUP:
+            if slot:
+                client.requested_slot = slot
+                client.status = "готов к заказу"
+                reply = visit_slot_reply(slot)
+            else:
+                reply = pickup_choice_reply()
+            return await self._finish(client, user_message, BotReply(reply), now)
+        if not client.phone:
+            client.status = "готов к заказу"
+            if not client.fulfillment_channel:
+                client.fulfillment_channel = CHANNEL_CALL
+            return await self._finish(client, user_message, BotReply(CLOSE_NEED_PHONE), now)
+        client.fulfillment_channel = client.fulfillment_channel or CHANNEL_CALL
+        client.status = "готов к заказу"
+        if not slot:
+            return await self._finish(client, user_message, BotReply(CLOSE_ASK_TIME), now)
+        client.requested_slot = slot
+        handoff_id = await self._create_handoff("call", client)
+        client.handoff_id = handoff_id
+        return await self._finish(
+            client,
+            user_message,
+            BotReply(call_slot_reply(slot, handoff_id=handoff_id)),
+            now,
+        )
+
+    async def _create_handoff(self, kind: str, client: ClientProfile) -> str | None:
+        if self.handoff is None:
+            return None
+        payload = {
+            "telegram_id": client.telegram_id,
+            "channel": client.fulfillment_channel,
+            "slot": client.requested_slot,
+            "phone": client.phone,
+            "product": client.product,
+        }
+        try:
+            return await self.handoff.create(kind, payload)
+        except Exception:
+            logger.exception("Manager handoff failed for telegram_id=%s", client.telegram_id)
+            return None
+
     async def _handle_closing(
         self,
         client: ClientProfile,
@@ -1831,6 +1924,8 @@ class ConversationService:
         now: datetime,
     ) -> BotReply:
         client.status = "готов к заказу"
+        if client.phone and not client.fulfillment_channel:
+            client.fulfillment_channel = CHANNEL_CALL
         fallback = closing_reply(client, user_message) or FALLBACK
         turn = await self._safe_respond(client, history, user_message)
         if turn and not turn.needs_human and is_valid_ai_reply(turn.reply):

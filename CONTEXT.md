@@ -7,7 +7,7 @@
 ## Текущее состояние
 
 - Python / aiogram 3, long polling.
-- `ConversationService` — оркестратор, не анкета. DeepSeek пишет клиенту; код валидирует и сохраняет факты. Slice C: structured line totals и grounded recovery вшиты в живой диалог.
+- `ConversationService` — оркестратор, не анкета. DeepSeek пишет клиенту; код валидирует и сохраняет факты. Slice C: structured line totals и grounded recovery вшиты в живой диалог. Slice F: закрытие заказа отделяет самовывоз от звонка, пишет слот времени и узкий порт `ManagerHandoff.create(kind, payload)` без amoCRM.
 - `/start` нового клиента — точный `START_TEXT`. Дальше любое сообщение, кроме явного валидного телефона/контакта, идёт в AI-менеджера.
 - `analyze_intake` остаётся компактным JSON-экстрактором сущностей. Клиентский ответ на вопрос / отказ / оффтоп / «кто вы» / ассортимент идёт через `respond()` + prompt bundle + tool `search_catalog`.
 - Вопрос про ассортимент, фрукты, консервацию или цену не подменяется шаблоном `PRODUCT_QUESTION` / `PRODUCT_ASSORTMENT`: `ConversationService` детерминированно вызывает локальный `search_catalog` до AI. Результат передаётся DeepSeek для естественной формулировки; при отбраковке/ошибке используется одноразовый repair-запрос, затем безопасный каталоговый fallback с товарами, производителями, фасовками, ценами и наличием. Для multi-intent сначала покрываются прямыми ответами все вопросы клиента о работе компании, затем допускается максимум один нужный вопрос.
@@ -49,10 +49,18 @@
 - Источник истины карточки — CRM; после рестарта этап по имени/телефону/продукту/объёму.
 - Секреты не в репе. Прокси принадлежит только Telegram-session.
 - Для прайса не добавлялся email-транспорт: почта — слот контакта, не доставка. Файл уходит только в текущий Telegram-чат по каналу существующего pending или явному «прайс в чат». `answer_document` обёрнут в безопасную обработку ошибки; успех и `sent_at` только после реальной отправки. Postgres, пуш и деплой не делались.
+- Самовывоз и звонок — разные каналы (`fulfillment_channel`: `pickup` | `call`). Слот визита/звонка — `requested_slot` на профиле (это не identity-слот). Обещание звонка только если in-memory `ManagerHandoff.create` вернул id; без адаптера слот подтверждается, `handoff_id` = None / undetermined, не catalog fallback и не «уточню и вернусь». Isolated QA-стенд по-прежнему `manager_handoff_observable=false`, адаптер к стенду не подключался. amoCRM HTTP и секреты не добавлялись. Адрес самовывоза: г. Пенза, ул. Аустрина, 137, корп. 2; окно «завтра можно» не подтверждено.
 
 ## Проверка
 
-- На 2026-08-26 (TDD: visible competitor mentions, без push/deploy):
+- На 2026-08-26 (TDD slice F: pickup≠call / time slot / ManagerHandoff port, без push/deploy):
+- `PYTHONPATH=src /home/hermes/projects/stokozavr-telegram-bot/.venv/bin/pytest -q` — `402 passed`.
+- `ruff check .` — `All checks passed!`
+- `ruff format --check .` — `64 files already formatted`.
+- `git diff --check` — без ошибок.
+- Коммит локальный: `Separate pickup from callback and add handoff port`. Пуш и деплой **не** выполнялись.
+
+Ранее на 2026-08-26 (TDD: visible competitor mentions, без push/deploy):
 - `PYTHONPATH=src /home/hermes/projects/stokozavr-telegram-bot/.venv/bin/pytest -q` — `404 passed`.
 - `ruff check .` — `All checks passed!`
 - `ruff format --check .` — `63 files already formatted`.
@@ -115,7 +123,7 @@
 
 ## Дальше
 
-Slice D pending-машины прайса и slice E видимых конкурентов сливаются в main. Не в этих срезах: closing/amoCRM, name-frequency, живой rerun персон P1–P8. Политика счётчика конкурентов: видимые упоминания, max 2, не подряд, без сжигания grounded-ответа.
+Slices D/E/F слиты в main: pending прайса, видимые конкуренты, pickup≠call + handoff-порт. Осталось: подключение handoff к QA-стенду, живой amoCRM, name-frequency, живой rerun P1–P8.
 
 Локально есть выдуманный тестовый каталог и tool-calling. Реальные коммерческие данные не добавлялись. На Beget ещё старый Иван.
 

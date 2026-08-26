@@ -54,6 +54,8 @@ def test_context_has_profile_missing_fields_stage_and_history_not_table_dump():
         "current_interest",
         "needs_human",
         "catalog_no_match_query",
+        "fulfillment_channel",
+        "requested_slot",
     }
     assert "telegram_id" not in ctx
     assert "telegram_id" not in ctx["profile"]

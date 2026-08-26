@@ -25,6 +25,8 @@ _PROFILE_FIELDS = (
     "current_interest",
     "needs_human",
     "catalog_no_match_query",
+    "fulfillment_channel",
+    "requested_slot",
 )
 
 
