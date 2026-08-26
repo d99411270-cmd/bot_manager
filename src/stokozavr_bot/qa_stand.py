@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import random
 import re
 import sys
+import unicodedata
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
@@ -29,6 +32,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\bDEEPSEEK_API_KEY\s*=\s*\S+"),
     re.compile(r"(?i)\b(?:api[_-]?key|authorization)\s*[:=]\s*\S+"),
 )
+_UNICODE_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})|\\+U([0-9a-fA-F]{8})")
 
 
 class QACredentialsError(RuntimeError):
@@ -43,6 +47,10 @@ class QATurnLimit(RuntimeError):
     """The QA agent used every allowed user turn."""
 
 
+class QATransportAckError(RuntimeError):
+    """Transport ACK arrived without a pending attachment."""
+
+
 @dataclass(slots=True)
 class QATurn:
     index: int
@@ -51,6 +59,11 @@ class QATurn:
     request_contact: bool = False
     delay: bool = False
     attachment_filename: str | None = None
+    attachment_bytes: int | None = None
+    attachment_sku_count: int | None = None
+    attachment_sha256: str | None = None
+    profile_before: dict[str, Any] = field(default_factory=dict)
+    profile_after: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -62,6 +75,10 @@ class QASessionResult:
     turns: list[QATurn]
     profile: dict[str, Any]
     path: Path | None = None
+    run_id: str | None = None
+    completed: bool = False
+    manager_handoff_observable: bool = False
+    handoff: None = None
 
 
 @dataclass(slots=True)
@@ -86,11 +103,13 @@ class IsolatedQASession:
     output_dir: Path | None = None
     auto_start: bool = True
     clock: Callable[[], datetime] | None = None
+    run_id: str | None = None
     service: ConversationService = field(init=False)
     turns: list[QATurn] = field(init=False, default_factory=list)
     _started: bool = field(init=False, default=False)
     _user_turns: int = field(init=False, default=0)
     _saved_path: Path | None = field(init=False, default=None)
+    _pending_attachment: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
@@ -105,8 +124,13 @@ class IsolatedQASession:
             raise QAIsolationError(
                 f"telegram_id QA-стенда должен быть изолированным (>= {ISOLATED_ID_MIN})"
             )
+        self.persona = decode_unicode_label(self.persona)
+        self.scenario = decode_unicode_label(self.scenario)
+        self.goal = decode_unicode_label(self.goal)
         if self.username is None:
             self.username = f"qa_{_slug(self.persona)}"[:32]
+        else:
+            self.username = decode_unicode_label(self.username)[:32]
         if self.output_dir is None:
             self.output_dir = DEFAULT_OUTPUT_DIR
         else:
@@ -115,6 +139,8 @@ class IsolatedQASession:
             self.clock = lambda: datetime.now(timezone.utc)
         if self.ai is None:
             self.ai = build_live_deepseek()
+        if not self.run_id:
+            self.run_id = uuid.uuid4().hex
         self.service = ConversationService(self.repository, self.ai, clock=self.clock)
         self.turns = []
 
@@ -133,6 +159,20 @@ class IsolatedQASession:
         if self._user_turns >= self.max_turns:
             raise QATurnLimit(f"Достигнут лимит ходов: {self.max_turns}")
         return await self._deliver(text, count_user_turn=True)
+
+    async def ack_attachment(self) -> dict[str, Any]:
+        if not self._pending_attachment:
+            raise QATransportAckError("ACK без pending attachment")
+        assert self.telegram_id is not None
+        await self.service.mark_price_list_sent(self.telegram_id)
+        self._pending_attachment = False
+        profile = serialize_profile(await self.profile())
+        return {
+            "event": "ack",
+            "ack": "attachment_sent",
+            "profile": profile,
+            **handoff_visibility(),
+        }
 
     async def profile(self) -> ClientProfile | None:
         assert self.telegram_id is not None
@@ -156,11 +196,13 @@ class IsolatedQASession:
                 "goal": self.goal,
                 "telegram_id": self.telegram_id,
                 "max_turns": self.max_turns,
+                "run_id": self.run_id,
+                "completed": False,
             },
         )
         start_reply = await self.start()
         if start_reply is not None and self.turns:
-            _write_jsonl(writer, self._reply_event(self.turns[-1]))
+            self._write_turn_events(writer, self.turns[-1])
         for raw in reader:
             line = raw.strip()
             if not line:
@@ -175,6 +217,9 @@ class IsolatedQASession:
                 continue
             if payload.get("stop"):
                 break
+            if "ack" in payload:
+                await self._handle_jsonl_ack(payload, writer)
+                continue
             user = payload.get("user")
             if not isinstance(user, str) or not user.strip():
                 _write_jsonl(writer, {"event": "error", "reason": "missing_user"})
@@ -183,11 +228,36 @@ class IsolatedQASession:
                 await self.send(user)
             except QATurnLimit:
                 break
-            _write_jsonl(writer, self._reply_event(self.turns[-1]))
+            self._write_turn_events(writer, self.turns[-1])
         return await self.finish(writer)
 
+    async def _handle_jsonl_ack(self, payload: dict[str, Any], writer: TextIO) -> None:
+        if payload.get("ack") != "attachment_sent":
+            _write_jsonl(writer, {"event": "error", "reason": "unknown_ack"})
+            return
+        try:
+            event = await self.ack_attachment()
+        except QATransportAckError:
+            _write_jsonl(writer, {"event": "error", "reason": "ack_without_pending_attachment"})
+            return
+        _write_jsonl(writer, event)
+
+    def _write_turn_events(self, writer: TextIO, turn: QATurn) -> None:
+        _write_jsonl(writer, self._reply_event(turn))
+        if turn.attachment_filename:
+            _write_jsonl(
+                writer,
+                {
+                    "event": "attachment",
+                    "filename": turn.attachment_filename,
+                    "bytes": turn.attachment_bytes,
+                    "sku_count": turn.attachment_sku_count,
+                    "sha256": turn.attachment_sha256,
+                },
+            )
+
     async def finish(self, writer: TextIO | None = None) -> QASessionResult:
-        path = self.save()
+        path = self.save(completed=True)
         profile = serialize_profile(await self.profile())
         result = QASessionResult(
             persona=self.persona,
@@ -197,12 +267,25 @@ class IsolatedQASession:
             turns=list(self.turns),
             profile=profile,
             path=path,
+            run_id=self.run_id,
+            completed=True,
+            manager_handoff_observable=False,
+            handoff=None,
         )
         if writer is not None:
-            _write_jsonl(writer, {"event": "done", "path": str(path), "profile": profile})
+            _write_jsonl(
+                writer,
+                {
+                    "event": "done",
+                    "path": str(path),
+                    "profile": profile,
+                    "run_id": self.run_id,
+                    "completed": True,
+                },
+            )
         return result
 
-    def save(self) -> Path:
+    def save(self, *, completed: bool = False) -> Path:
         assert self.output_dir is not None
         assert self.telegram_id is not None
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -215,8 +298,11 @@ class IsolatedQASession:
             "telegram_id": self.telegram_id,
             "username": self.username,
             "max_turns": self.max_turns,
+            "run_id": self.run_id,
+            "completed": completed,
             "turns": [self._turn_payload(turn) for turn in self.turns],
             "profile": serialize_profile(_sync_profile(self.repository, self.telegram_id)),
+            **handoff_visibility(),
         }
         path.write_text(
             json.dumps(redact_tree(payload), ensure_ascii=False, indent=2) + "\n",
@@ -227,9 +313,12 @@ class IsolatedQASession:
 
     async def _deliver(self, text: str, *, count_user_turn: bool) -> BotReply:
         assert self.telegram_id is not None
+        profile_before = serialize_profile(_sync_profile(self.repository, self.telegram_id))
         reply = await self.service.handle(IncomingMessage(self.telegram_id, self.username, text))
         if count_user_turn:
             self._user_turns += 1
+        profile_after = serialize_profile(_sync_profile(self.repository, self.telegram_id))
+        metrics = _attachment_metrics(reply.attachment_content, reply.attachment_filename)
         self.turns.append(
             QATurn(
                 index=len(self.turns),
@@ -238,8 +327,15 @@ class IsolatedQASession:
                 request_contact=reply.request_contact,
                 delay=reply.delay,
                 attachment_filename=reply.attachment_filename,
+                attachment_bytes=metrics.get("attachment_bytes"),
+                attachment_sku_count=metrics.get("attachment_sku_count"),
+                attachment_sha256=metrics.get("attachment_sha256"),
+                profile_before=profile_before,
+                profile_after=profile_after,
             )
         )
+        if reply.attachment_filename:
+            self._pending_attachment = True
         return reply
 
     def _reply_event(self, turn: QATurn) -> dict[str, Any]:
@@ -253,6 +349,11 @@ class IsolatedQASession:
             "status": profile.status if profile else None,
             "remaining": remaining,
             "attachment_filename": turn.attachment_filename,
+            "attachment_bytes": turn.attachment_bytes,
+            "attachment_sku_count": turn.attachment_sku_count,
+            "attachment_sha256": turn.attachment_sha256,
+            "profile_before": turn.profile_before,
+            "profile_after": turn.profile_after,
         }
 
     @staticmethod
@@ -264,6 +365,11 @@ class IsolatedQASession:
             "request_contact": turn.request_contact,
             "delay": turn.delay,
             "attachment_filename": turn.attachment_filename,
+            "attachment_bytes": turn.attachment_bytes,
+            "attachment_sku_count": turn.attachment_sku_count,
+            "attachment_sha256": turn.attachment_sha256,
+            "profile_before": turn.profile_before,
+            "profile_after": turn.profile_after,
         }
 
 
@@ -346,21 +452,22 @@ async def smoke_real_deepseek(output_dir: Path | None = None) -> QASmokeReport:
     )
     await session.start()
     reply = await session.send("какие фрукты есть?")
-    path = session.save()
+    result = await session.finish()
     preview = redact_text(reply.text)[:160]
     return QASmokeReport(
         ready=True,
         model=getattr(session.ai, "model", None),
         reply_preview=preview,
-        path=path,
+        path=result.path,
     )
 
 
 def serialize_profile(profile: ClientProfile | None) -> dict[str, Any]:
-    if profile is None:
-        return {}
     payload: dict[str, Any] = {}
-    for item in fields(profile):
+    for item in fields(ClientProfile):
+        if profile is None:
+            payload[item.name] = None
+            continue
         value = getattr(profile, item.name)
         if isinstance(value, datetime):
             payload[item.name] = value.isoformat()
@@ -468,13 +575,48 @@ def _sync_profile(repository: InMemoryCRMRepository, telegram_id: int) -> Client
 
 
 def _write_jsonl(stream: TextIO, payload: dict[str, Any]) -> None:
-    stream.write(json.dumps(redact_tree(payload), ensure_ascii=False) + "\n")
+    event = {**payload, **handoff_visibility()}
+    stream.write(json.dumps(redact_tree(event), ensure_ascii=False) + "\n")
     stream.flush()
 
 
+def handoff_visibility() -> dict[str, Any]:
+    return {"manager_handoff_observable": False, "handoff": None}
+
+
+def decode_unicode_label(value: str) -> str:
+    text = value
+    for _ in range(4):
+        decoded = _UNICODE_ESCAPE_RE.sub(
+            lambda match: chr(int(match.group(1) or match.group(2), 16)),
+            text,
+        )
+        if decoded == text:
+            break
+        text = decoded
+    return unicodedata.normalize("NFC", text)
+
+
 def _slug(value: str) -> str:
-    compact = re.sub(r"[^0-9a-zа-яё]+", "-", value.lower()).strip("-")
-    return compact or "qa"
+    text = decode_unicode_label(value).casefold()
+    for ch in "/\\:\0":
+        text = text.replace(ch, "-")
+    compact = re.sub(r"[^\w]+", "-", text, flags=re.UNICODE)
+    compact = re.sub(r"-{2,}", "-", compact).strip(".-_")
+    return compact[:80] or "qa"
+
+
+def _attachment_metrics(content: str | None, filename: str | None) -> dict[str, Any]:
+    if not filename:
+        return {}
+    payload: dict[str, Any] = {"attachment_filename": filename}
+    if content is None:
+        return payload
+    encoded = content.encode("utf-8")
+    payload["attachment_bytes"] = len(encoded)
+    payload["attachment_sku_count"] = content.count("SKU:")
+    payload["attachment_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 if __name__ == "__main__":
