@@ -31,7 +31,12 @@ _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9]+\b"),
     re.compile(r"(?i)\bDEEPSEEK_API_KEY\s*=\s*\S+"),
     re.compile(r"(?i)\b(?:api[_-]?key|authorization)\s*[:=]\s*\S+"),
+    re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+    re.compile(r"(?:\+7|8)\d{10}"),
+    re.compile(r"\+7[\d\s()-]{10,}"),
 )
+_PII_PROFILE_FIELDS = frozenset({"email", "phone", "landline"})
+_REDACTED = "[REDACTED]"
 _UNICODE_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})|\\+U([0-9a-fA-F]{8})")
 
 
@@ -471,6 +476,8 @@ def serialize_profile(profile: ClientProfile | None) -> dict[str, Any]:
         value = getattr(profile, item.name)
         if isinstance(value, datetime):
             payload[item.name] = value.isoformat()
+        elif item.name in _PII_PROFILE_FIELDS and value:
+            payload[item.name] = _REDACTED
         else:
             payload[item.name] = value
     return redact_tree(payload)
@@ -482,7 +489,7 @@ def redact_text(text: str) -> str:
     if env_key:
         redacted = redacted.replace(env_key, "[REDACTED]")
     for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
+        redacted = pattern.sub(_REDACTED, redacted)
     return redacted
 
 

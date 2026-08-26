@@ -8,6 +8,13 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from stokozavr_bot.catalog_tokens import (
+    best_catalog_scores,
+    catalog_record_score,
+    expand_query_terms,
+    term_matches_haystack,
+)
+
 if TYPE_CHECKING:
     from stokozavr_bot.catalog_quotes import LineTotalQuote
 
@@ -20,32 +27,6 @@ _FILENAME_ALIASES = {
     "konservy": ("консервы", "консервация", "консерв"),
     "makarony": ("макароны", "макарон"),
     "maslo": ("масло", "масла"),
-}
-
-# Customer wording is normalized here, before matching catalog records.  Keep
-# the map focused on product/category vocabulary: DeepSeek still interprets
-# intent and receives the original message unchanged.
-_QUERY_ALIASES = {
-    "консервы": "консервация",
-    "консерв": "консервация",
-    "консервации": "консервация",
-    "консервацию": "консервация",
-    "консервацией": "консервация",
-    "горошек": "горошек зелёный",
-    "горошка": "горошек зелёный",
-    "кукуруза": "кукуруза сладкая",
-    "кукурузы": "кукуруза сладкая",
-    "огурец": "огурцы маринованные",
-    "огурцы": "огурцы маринованные",
-    "огурцов": "огурцы маринованные",
-    "огурцами": "огурцы маринованные",
-}
-_CATEGORY_PREFIX_ALIASES = {
-    "фрукт": "фрукты",
-    "овощ": "овощи",
-    "бакале": "бакалея",
-    "напит": "напитки",
-    "макарон": "макароны",
 }
 
 
@@ -360,32 +341,6 @@ def _category_listing(files: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _query_terms(query: str) -> list[str]:
-    terms: list[str] = []
-    for token in re.findall(r"[\w-]+", query.lower(), flags=re.UNICODE):
-        if len(token) < 3 or re.search(r"подешев|вариант|сравн|конкур", token):
-            continue
-        canonical = _QUERY_ALIASES.get(token)
-        if canonical is None:
-            canonical = next(
-                (
-                    value
-                    for prefix, value in _CATEGORY_PREFIX_ALIASES.items()
-                    if token.startswith(prefix)
-                ),
-                token,
-            )
-            candidates = (canonical,)
-        else:
-            # Keep the literal term too, so an existing exact product search
-            # remains broad when a colloquial alias is ambiguous (e.g. огурцы).
-            candidates = (token, canonical)
-        for term in candidates:
-            if term not in terms:
-                terms.append(term)
-    return terms
-
-
 def search(query: str, *, include_competitors: bool = False) -> str:
     files = _load_catalog()
     if not files:
@@ -395,17 +350,34 @@ def search(query: str, *, include_competitors: bool = False) -> str:
         return _category_listing(files)
     records = _all_records()
 
-    tokens = _query_terms(cleaned)
+    tokens = expand_query_terms(cleaned)
 
     def matches(record: CatalogRecord) -> bool:
         haystack = (
             f"{record.category} {record.subcategory} {record.sku} {record.manufacturer} "
             f"{record.packaging} {record.price} {record.availability} {record.updated_at}"
-        ).lower()
-        return any(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", haystack) for token in tokens)
+        )
+        return any(term_matches_haystack(token, haystack) for token in tokens)
 
-    primary = [record for record in records if not record.is_competitor and matches(record)]
-    competitors = [record for record in records if record.is_competitor and matches(record)]
+    def scored(record: CatalogRecord) -> int:
+        return catalog_record_score(
+            cleaned,
+            category=record.category,
+            subcategory=record.subcategory,
+            sku=record.sku,
+            manufacturer=record.manufacturer,
+        )
+
+    primary = best_catalog_scores(
+        [
+            (scored(record), record)
+            for record in records
+            if not record.is_competitor and matches(record)
+        ]
+    )
+    competitors = best_catalog_scores(
+        [(scored(record), record) for record in records if record.is_competitor and matches(record)]
+    )
     matched = primary
     if include_competitors and primary:
         matched = primary + competitors

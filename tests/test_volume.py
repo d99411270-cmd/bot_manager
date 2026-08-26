@@ -267,6 +267,57 @@ async def test_packaging_fragment_does_not_overwrite_order_volume(now):
 
 
 @pytest.mark.asyncio
+async def test_packaging_fragment_is_not_saved_as_first_order_volume(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=14,
+            name="Олег",
+            phone="+790****0014",
+            product="кукуруза сладкая",
+            current_interest="кукуруза сладкая",
+            status="уточнение объёма",
+            contact_skipped=True,
+        )
+    )
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="question", volume="12×340г")],
+        [AiTurn(reply="Фасовка 12×340г, 690 ₽ за упаковку.", volume="12×340г")],
+    )
+    await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(14, None, "кукуруза сладкая какая фасовка?")
+    )
+    saved = await repo.get_client(14)
+
+    assert saved.volume is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["36 банок", "20 кг", "10 упаковок"])
+async def test_explicit_order_quantity_still_persists_as_first_volume(now, raw):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=15,
+            name="Олег",
+            phone="+790****0015",
+            product="кукуруза сладкая",
+            current_interest="кукуруза сладкая",
+            status="уточнение объёма",
+            contact_skipped=True,
+        )
+    )
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data", volume=raw)],
+        [AiTurn(reply="Зафиксировал объём.", volume=raw)],
+    )
+    await ConversationService(repo, ai, clock=lambda: now).handle(IncomingMessage(15, None, raw))
+    saved = await repo.get_client(15)
+
+    assert saved.volume == raw
+
+
+@pytest.mark.asyncio
 async def test_skolko_price_question_still_uses_profile_volume(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

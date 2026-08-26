@@ -817,11 +817,62 @@ def _is_volume_only_followup(text: str) -> bool:
     return _utterance_search_key(cleaned) is None
 
 
+def _is_referential_followup(text: str) -> bool:
+    """True for anaphora that points at the current topic without naming a new one."""
+    cleaned = (text or "").strip()
+    if not cleaned or _utterance_search_key(cleaned):
+        return False
+    tokens = [
+        token for token in re.findall(r"[а-яёa-z0-9-]+", cleaned.lower().replace("ё", "е")) if token
+    ]
+    if not tokens:
+        return False
+    closed = {
+        "а",
+        "и",
+        "ну",
+        "же",
+        "то",
+        "вот",
+        "сам",
+        "сама",
+        "само",
+        "самый",
+        "самая",
+        "самое",
+        "этот",
+        "эта",
+        "это",
+        "эти",
+        "тот",
+        "та",
+        "те",
+        "он",
+        "она",
+        "оно",
+        "они",
+        "него",
+        "нее",
+        "них",
+        "такой",
+        "такая",
+        "такое",
+        "такие",
+        "товар",
+        "продукт",
+        "позиция",
+        "вариант",
+    }
+    return all(token in closed for token in tokens)
+
+
 def _is_anaphoric_followup(text: str) -> bool:
     """Price/availability/packaging follow-up that does not name a new catalog topic."""
     cleaned = (text or "").strip()
     if not cleaned or _utterance_search_key(cleaned):
         return False
+    if _is_referential_followup(cleaned):
+        return True
     if asks_for_unverified_info(cleaned) or asks_about_pending_update(cleaned):
         return True
     return bool(re.search(r"\bфасовк\w*|\bупаковк\w*", cleaned.lower()))
@@ -841,13 +892,21 @@ def resolve_catalog_query(
     if utterance:
         return utterance, "utterance"
     semantic_product = semantic.product.strip() if semantic and semantic.product else None
-    if semantic_product and requested_identity_slot(client) not in {"phone", "email"}:
+    if semantic_product and _is_referential_followup(semantic_product):
+        semantic_product = None
+    if (
+        semantic_product
+        and requested_identity_slot(client) not in {"phone", "email"}
+        and not _is_referential_followup(text)
+    ):
         return semantic_product, "semantic"
     if _is_volume_only_followup(text):
         sticky = client.catalog_no_match_query or client.current_interest or client.product
         return (sticky, "sticky") if sticky else (None, None)
     if _is_anaphoric_followup(text):
-        topic = client.current_interest or client.product
+        topic = client.catalog_no_match_query or client.current_interest or client.product
+        if client.catalog_no_match_query:
+            return client.catalog_no_match_query, "sticky"
         return topic, "interest" if topic else None
     if client.catalog_no_match_query:
         if _is_non_product_intake_text(text) or not text.strip():
@@ -1513,7 +1572,9 @@ class ConversationService:
             and looks_like_volume(semantic.volume)
         ):
             volume = semantic.volume.strip()[:300]
-        if _looks_like_packaging_fragment(text):
+        if _looks_like_packaging_fragment(text) or (
+            volume is not None and _looks_like_packaging_fragment(volume)
+        ):
             volume = None
         if (
             allow_catalog_facts
@@ -1905,7 +1966,7 @@ class ConversationService:
         if (
             turn.volume
             and looks_like_volume(turn.volume)
-            and (not client.volume or not _looks_like_packaging_fragment(turn.volume))
+            and not _looks_like_packaging_fragment(turn.volume)
         ):
             client.volume = turn.volume[:300]
         if is_qualified(client) and client.status not in {"готов к заказу", "получил предложение"}:

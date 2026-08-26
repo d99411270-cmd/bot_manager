@@ -171,6 +171,42 @@ async def test_no_match_is_repeated_for_volume_followup_without_saving_fake_volu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("followup", ["а этот?", "а этот", "этот?", "а эта?"])
+async def test_referential_followup_after_unknown_keeps_same_entity_sticky(followup):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=21, name="Энрике", phone="+799****0021", status="уточнение продукта"
+        )
+    )
+    ai = NoMatchAI(
+        analyses=[
+            IntakeAnalysis(intent="provide_data", product=UNKNOWN_PRODUCT),
+            IntakeAnalysis(intent="question", product=followup),
+        ],
+        replies=[AiTurn(reply=CATALOG_NO_MATCH_REPLY), AiTurn(reply=CATALOG_NO_MATCH_REPLY)],
+    )
+    service = ConversationService(repo, ai, clock=lambda: NOW)
+
+    first = await service.handle(IncomingMessage(21, None, UNKNOWN_PRODUCT))
+    second = await service.handle(IncomingMessage(21, None, followup))
+    saved = await repo.get_client(21)
+
+    assert "нет в каталоге" in first.text.lower()
+    assert "нет в каталоге" in second.text.lower()
+    assert saved.catalog_no_match_query == UNKNOWN_PRODUCT
+    assert saved.product is None
+    assert saved.current_interest is None
+    assert followup not in (saved.catalog_no_match_query or "")
+    assert all(
+        UNKNOWN_PRODUCT in value or "CATALOG_RESULT_EMPTY" in value for value in ai.catalog_calls
+    )
+    assert not any(
+        followup == value.strip() or f"«{followup}»" in value for value in ai.catalog_calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_valid_catalog_product_still_advances_to_volume_and_accepts_grams_followup():
     repo = InMemoryCRMRepository()
     await repo.save_client(

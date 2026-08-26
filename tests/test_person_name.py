@@ -102,6 +102,39 @@ async def test_catalog_token_is_not_a_name_even_if_parse_person_name_would_accep
 
 
 @pytest.mark.asyncio
+async def test_inflected_rice_is_not_captured_as_a_person_name(now):
+    assert parse_person_name("риса") == ("Риса", None)
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data")],
+        [AiTurn(reply="Рис длиннозёрный есть, фасовка 10 x 800 г.")],
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(31, None, "риса"))
+    saved = await repo.get_client(31)
+
+    assert saved.name is None
+    assert saved.last_name is None
+    assert "очень приятно" not in result.text.lower()
+    assert PHONE_QUESTION not in result.text
+    assert "рис" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_real_person_name_still_captured_after_catalog_normalization(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(32, None, "Анна"))
+    saved = await repo.get_client(32)
+
+    assert saved.name == "Анна"
+    assert "Анна" in result.text
+    assert PHONE_QUESTION in result.text
+
+
+@pytest.mark.asyncio
 async def test_catalog_token_in_product_stage_does_not_overwrite_name(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(ClientProfile(telegram_id=4, name="Настя", status="уточнение продукта"))

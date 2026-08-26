@@ -207,8 +207,53 @@ async def test_google_sheets_roundtrips_original_and_current_interest():
     assert loaded.original_interests == ["творожки"]
     assert loaded.current_interest == "сок"
     comment = book.sheets["Клиенты"].rows[1][-1]
-    assert "Исходный интерес: творожки" in comment
-    assert "Текущий интерес: сок" in comment
+    assert "Исходный интерес: творожки" in comment or "Интересы" in comment
+    assert "Текущий интерес: сок" in comment or "Интересы" in comment
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_roundtrips_interests_with_comma_and_pipe():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 26, 12, tzinfo=timezone.utc)
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=73,
+            name="Анна",
+            product="рис",
+            original_interests=["огурцы, свежие"],
+            current_interest="рис | крупа",
+            first_contact_at=now,
+            last_contact_at=now,
+        )
+    )
+    loaded = await repo.get_client(73)
+
+    assert loaded.original_interests == ["огурцы, свежие"]
+    assert loaded.current_interest == "рис | крупа"
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_reads_legacy_plain_interest_comments():
+    book = FakeBook()
+    book.sheets["Клиенты"].rows.append(
+        [
+            74,
+            "",
+            "Анна",
+            "",
+            "сок",
+            "новый",
+            "",
+            "",
+            "Исходный интерес: творожки | Текущий интерес: сок",
+        ]
+    )
+    repo = GoogleSheetsCRMRepository(book)
+    loaded = await repo.get_client(74)
+
+    assert loaded.original_interests == ["творожки"]
+    assert loaded.current_interest == "сок"
 
 
 @pytest.mark.asyncio

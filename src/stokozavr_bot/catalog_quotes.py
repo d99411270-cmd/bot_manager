@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
+from stokozavr_bot.catalog_tokens import (
+    catalog_record_score,
+    catalog_word_tokens,
+)
+
 if TYPE_CHECKING:
     from stokozavr_bot.product_catalog import CatalogRecord
 
@@ -247,8 +252,14 @@ def _select_record(
         return QuoteFailure("no_match")
     scored: list[tuple[int, CatalogRecord]] = []
     for record in records:
-        score = _record_score(record, terms)
-        if score:
+        score = catalog_record_score(
+            product,
+            category=record.category,
+            subcategory=record.subcategory,
+            sku=record.sku,
+            manufacturer=record.manufacturer,
+        )
+        if score > 0:
             scored.append((score, record))
     if not scored:
         return QuoteFailure("no_match")
@@ -412,65 +423,12 @@ def _product_terms(product: str) -> list[str]:
         "есть",
     }
     terms: list[str] = []
-    for token in re.findall(r"[\w-]+", (product or "").lower()):
+    for token in catalog_word_tokens(product or ""):
         if len(token) < 3 or token.isdigit() or token in skip:
             continue
         if token not in terms:
             terms.append(token)
     return terms
-
-
-def _stem(token: str) -> str:
-    cleaned = token.lower().replace("ё", "е")
-    if len(cleaned) <= 4:
-        return cleaned
-    for ending in (
-        "ями",
-        "ами",
-        "ого",
-        "ему",
-        "ими",
-        "ыми",
-        "ой",
-        "ей",
-        "ий",
-        "ый",
-        "ая",
-        "яя",
-        "ое",
-        "ее",
-        "ые",
-        "ие",
-        "ов",
-        "ев",
-        "ах",
-        "ях",
-        "ом",
-        "ем",
-        "ы",
-        "и",
-        "а",
-        "я",
-        "у",
-        "ю",
-        "е",
-        "о",
-    ):
-        if cleaned.endswith(ending) and len(cleaned) - len(ending) >= 4:
-            return cleaned[: -len(ending)]
-    return cleaned
-
-
-def _term_in_haystack(term: str, haystack: str) -> bool:
-    if term in haystack:
-        return True
-    stem = _stem(term)
-    return len(stem) >= 4 and stem in haystack
-
-
-def _record_score(record: CatalogRecord, terms: Iterable[str]) -> int:
-    haystack = f"{record.category} {record.subcategory} {record.sku} {record.manufacturer}".lower()
-    return sum(1 for term in terms if _term_in_haystack(term, haystack))
 
 
 def _price_decimal(price: str) -> Decimal | None:

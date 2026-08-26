@@ -540,6 +540,58 @@ def test_explicit_save_before_finish_is_incomplete(tmp_path, now):
 
 
 @pytest.mark.asyncio
+async def test_profile_snapshots_redact_email_and_phones_but_keep_repo_real(tmp_path, now):
+    telegram_id = ISOLATED_ID_MIN + 88
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=telegram_id,
+            name="Сергей",
+            product="яблоки",
+            phone="+79001234567",
+            landline="482015",
+            email="buyer@example.com",
+            status="уточнение объёма",
+            contact_skipped=False,
+        )
+    )
+    session = _session(
+        tmp_path,
+        now,
+        repository=repo,
+        telegram_id=telegram_id,
+        max_turns=1,
+        auto_start=False,
+        ai=ScriptedAI(
+            analyses=[IntakeAnalysis(intent="question")],
+            turns=[AiTurn(reply="Яблоки сезонные есть. Какой объём берёте?")],
+        ),
+    )
+    await session.send("какие яблоки есть?")
+    path = (await session.finish()).path
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    turn = payload["turns"][-1]
+    live = await session.profile()
+
+    assert live is not None
+    assert live.email == "buyer@example.com"
+    assert live.phone == "+79001234567"
+    assert live.landline == "482015"
+    assert live.name == "Сергей"
+    assert live.product == "яблоки"
+    assert "buyer@example.com" not in raw
+    assert "+79001234567" not in raw
+    assert "79001234567" not in raw
+    assert "482015" not in raw
+    assert turn["profile_after"]["email"] != "buyer@example.com"
+    assert turn["profile_after"]["phone"] != "+79001234567"
+    assert turn["profile_after"]["landline"] != "482015"
+    assert turn["profile_after"]["name"] == "Сергей"
+    assert turn["profile_after"]["product"] == "яблоки"
+
+
+@pytest.mark.asyncio
 async def test_jsonl_hello_and_done_carry_run_id_and_completion(tmp_path, now):
     session = _session(tmp_path, now, max_turns=1, run_id="run-jsonl-1")
     inbox = io.StringIO('{"user": "Анна"}\n{"stop": true}\n')

@@ -78,6 +78,15 @@ def test_rice_line_total_allows_derived_price_per_kg():
     assert quote.allowed_amounts >= {"680", "85"}
 
 
+def test_line_total_quote_inflected_rice_resolves_to_rice_sku():
+    quote = line_total_quote("риса", "8 кг")
+
+    assert not isinstance(quote, QuoteFailure)
+    assert quote.record.sku == "GRC-RICE-001"
+    assert quote.pack_count == 1
+    assert quote.total == "680 ₽"
+
+
 def test_line_total_quote_potato_100kg_is_four_nets():
     quote = line_total_quote("картофель", "100 кг")
 
@@ -125,6 +134,35 @@ def test_pickled_cucumbers_cannot_fill_a_kilogram_order():
     result = line_total_quote("огурцы маринованные", "20 кг")
 
     assert isinstance(result, QuoteFailure)
+
+
+def test_fresh_modifier_selects_fresh_cucumber_for_pack_units():
+    quote = line_total_quote("свежие огурцы", "2 упаковки")
+
+    assert not isinstance(quote, QuoteFailure)
+    assert quote.record.sku == "VEG-CUCUMBER-001"
+    assert quote.pack_count == 2
+
+
+def test_short_fruit_modifier_selects_fresh_cucumber_for_pack_units():
+    quote = line_total_quote("короткоплодные огурцы", "2 короба")
+
+    assert not isinstance(quote, QuoteFailure)
+    assert quote.record.sku == "VEG-CUCUMBER-001"
+
+
+def test_pickled_modifier_selects_pickles_for_pack_units():
+    quote = line_total_quote("маринованные огурцы", "2 упаковки")
+
+    assert not isinstance(quote, QuoteFailure)
+    assert quote.record.sku == "CAN-PICKLES-001"
+
+
+def test_bare_cucumbers_pack_units_stay_ambiguous():
+    result = line_total_quote("огурцы", "2 упаковки")
+
+    assert isinstance(result, QuoteFailure)
+    assert result.reason == "ambiguous_product"
 
 
 def test_ambiguous_category_does_not_invent_a_total():

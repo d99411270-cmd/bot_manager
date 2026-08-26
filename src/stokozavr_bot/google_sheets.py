@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -23,6 +24,7 @@ CLIENT_HEADERS = [
 ]
 HISTORY_HEADERS = ["дата", "telegram_id", "сообщение клиента", "ответ Ивана"]
 CATALOG_NO_MATCH_MARKER = "Товар не найден: "
+INTERESTS_MARKER = "Интересы:"
 
 
 class GoogleSheetsCRMRepository:
@@ -248,6 +250,10 @@ def _split_interests(extra: str) -> tuple[list[str] | None, str | None, str]:
     current: str | None = None
     kept: list[str] = []
     for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        decoded = _decode_interests_part(part)
+        if decoded is not None:
+            original, current = decoded
+            continue
         if part.startswith("Исходный интерес: "):
             raw = part.removeprefix("Исходный интерес: ")
             values = [item.strip() for item in raw.split(",") if item.strip()]
@@ -257,6 +263,39 @@ def _split_interests(extra: str) -> tuple[list[str] | None, str | None, str]:
         else:
             kept.append(part)
     return original, current, " | ".join(kept)
+
+
+def _decode_interests_part(part: str) -> tuple[list[str] | None, str | None] | None:
+    if not part.startswith(INTERESTS_MARKER):
+        return None
+    blob = part.removeprefix(INTERESTS_MARKER).strip()
+    try:
+        raw = base64.urlsafe_b64decode(blob.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    original_raw = payload.get("o", payload.get("original"))
+    current_raw = payload.get("c", payload.get("current"))
+    original: list[str] | None
+    if isinstance(original_raw, list):
+        original = [str(item) for item in original_raw if str(item).strip()] or None
+    else:
+        original = None
+    current = (
+        str(current_raw).strip() if isinstance(current_raw, str) and current_raw.strip() else None
+    )
+    return original, current
+
+
+def _encode_interests(original: list[str] | None, current: str | None) -> str | None:
+    if not original and not current:
+        return None
+    payload = {"o": list(original or []), "c": current}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+    return f"{INTERESTS_MARKER}{encoded}"
 
 
 def _build_comment(client: ClientProfile) -> str:
@@ -279,10 +318,9 @@ def _build_comment(client: ClientProfile) -> str:
         parts.append(f"Прайс отправлен: {client.price_list_sent_at.isoformat()}")
     if client.needs_human:
         parts.append("Нужен менеджер")
-    if client.original_interests:
-        parts.append(f"Исходный интерес: {', '.join(client.original_interests)}")
-    if client.current_interest:
-        parts.append(f"Текущий интерес: {client.current_interest}")
+    encoded_interests = _encode_interests(client.original_interests, client.current_interest)
+    if encoded_interests:
+        parts.append(encoded_interests)
     if client.catalog_no_match_query:
         query = client.catalog_no_match_query.replace("|", "/")
         parts.append(f"{CATALOG_NO_MATCH_MARKER}{query}")

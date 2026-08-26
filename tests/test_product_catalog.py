@@ -87,11 +87,49 @@ def test_search_product_synonym_corn_returns_sweet_corn_position():
     assert "CAN-CORN-ALT-001" not in result
 
 
+def test_search_inflected_rice_resolves_to_rice_not_no_match():
+    result = search("риса")
+
+    assert "GRC-RICE-001" in result
+    assert "рис длиннозёрный" in result.lower()
+    assert "подтверждённых позиций" not in result.lower()
+    assert "GRC-RICE-ALT-001" not in result
+
+
 def test_search_inflected_conservation_category_returns_all_positions():
     result = search("консервации")
 
     assert result.count("SKU:") == 5
     assert "CAN-BEAN-001" in result
+
+
+def test_search_fresh_cucumber_modifier_selects_short_fruit_not_pickles():
+    result = search("свежие огурцы")
+
+    assert "VEG-CUCUMBER-001" in result
+    assert "CAN-PICKLES-001" not in result
+    assert "короткоплодные" in result.lower()
+
+
+def test_search_short_fruit_modifier_selects_fresh_cucumber():
+    result = search("огурцы короткоплодные")
+
+    assert "VEG-CUCUMBER-001" in result
+    assert "CAN-PICKLES-001" not in result
+
+
+def test_search_pickled_modifier_selects_canned_cucumber():
+    result = search("огурцы маринованные")
+
+    assert "CAN-PICKLES-001" in result
+    assert "VEG-CUCUMBER-001" not in result
+
+
+def test_search_bare_cucumbers_may_list_both_fresh_and_pickled():
+    result = search("огурцы")
+
+    assert "VEG-CUCUMBER-001" in result
+    assert "CAN-PICKLES-001" in result
 
 
 def test_search_fruits_returns_apples_and_bananas():
