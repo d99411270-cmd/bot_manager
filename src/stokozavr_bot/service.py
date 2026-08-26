@@ -11,6 +11,7 @@ from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     grounded_search_reply,
+    infer_catalog_interest,
     search,
 )
 from .repositories import CRMRepository
@@ -479,8 +480,8 @@ class ConversationService:
             return await self._handle_closing(client, history, message.text, now)
 
         catalog_result = (
-            search(client.product or text)
-            if client.product
+            search(client.current_interest or client.product or text)
+            if client.current_interest or client.product
             else search(text)
             if _is_catalog_or_price_question(text)
             else None
@@ -531,6 +532,7 @@ class ConversationService:
         turn = await self._safe_respond(client, history, message.text, catalog_result)
         rejection_reason = _ai_rejection_reason(turn, catalog_result)
         if rejection_reason is None and turn is not None:
+            self._remember_catalog_interest(client, catalog_result, turn.reply)
             return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
         logger.warning(
             "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
@@ -807,6 +809,8 @@ class ConversationService:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         turn = await self._safe_respond(client, history, user_message, catalog_result)
         self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
+        if turn is not None and _ai_rejection_reason(turn, catalog_result) is None:
+            self._remember_catalog_interest(client, catalog_result, turn.reply)
         rejection_reason = _ai_rejection_reason(turn, catalog_result)
         if rejection_reason is not None:
             if turn and turn.needs_human:
@@ -858,6 +862,23 @@ class ConversationService:
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now
         )
+
+    @staticmethod
+    def _remember_catalog_interest(
+        client: ClientProfile, catalog_result: str | None, reply: str
+    ) -> None:
+        if not catalog_result:
+            return
+        interest = infer_catalog_interest(catalog_result, reply)
+        if not interest:
+            return
+        if client.product and client.product != interest:
+            client.original_interests = list(client.original_interests or [client.product])
+        client.current_interest = interest[:300]
+        if has_contact(client):
+            client.product = interest[:300]
+            if client.status == "уточнение продукта":
+                client.status = "уточнение объёма"
 
     @staticmethod
     def _apply_turn_facts(client: ClientProfile, turn: AiTurn) -> None:

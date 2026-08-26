@@ -339,6 +339,51 @@ async def test_conserves_profile_passes_normalized_catalog_to_deepseek_without_v
     assert len(ai.calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_price_followup_reuses_previous_vegetable_and_fruit_interest(now):
+    class ContextAI(FakeAI):
+        def __init__(self):
+            super().__init__(
+                [
+                    AiTurn(reply="Есть картофель 750 ₽ за сетку и яблоки 820 ₽ за короб."),
+                    AiTurn(reply="Картофель — 750 ₽ за сетку, яблоки — 820 ₽ за короб."),
+                ]
+            )
+            self.catalog_calls = []
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append((profile, history, message, catalog_result))
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=68,
+            name="Ирина",
+            status="уточнение продукта",
+        )
+    )
+    ai = ContextAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(68, None, "Какие овощи фруктв?"))
+    result = await service.handle(IncomingMessage(68, None, "А какие цены?"))
+
+    assert "750 ₽" in first.text
+    assert "820 ₽" in first.text
+    assert "750 ₽" in result.text
+    assert "820 ₽" in result.text
+    assert len(ai.catalog_calls) == 2
+    assert "VEG-POTATO-001" in ai.catalog_calls[0][3]
+    assert "FRU-APPLE-001" in ai.catalog_calls[0][3]
+    assert "VEG-POTATO-001" in ai.catalog_calls[1][3]
+    assert "FRU-APPLE-001" in ai.catalog_calls[1][3]
+    assert ai.catalog_calls[1][2] == "А какие цены?"
+    saved = await repo.get_client(68)
+    assert saved.product is None
+    assert set(saved.current_interest.split(" и ")) == {"овощи", "фрукты"}
+
+
 async def test_ai_gets_profile_and_recent_history_only(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

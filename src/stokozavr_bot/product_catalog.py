@@ -247,6 +247,37 @@ def catalog_price_lines(query: str) -> list[str]:
     return [line for line in result.splitlines() if "Цена:" in line]
 
 
+def infer_catalog_interest(result: str, reply: str) -> str | None:
+    """Return categories explicitly reflected by a grounded catalog answer."""
+    if not _catalog_result_has_positions(result):
+        return None
+    categories: list[str] = []
+    reply_lower = reply.lower()
+    for raw_line in result.splitlines():
+        if "SKU:" not in raw_line:
+            continue
+        category = _field(raw_line, "Категория")
+        subcategory = _field(raw_line, "Подкатегория")
+        mentioned = any(
+            term
+            and (
+                term.lower() in reply_lower
+                or any(
+                    len(word) >= 4 and word.lower() in reply_lower
+                    for word in re.findall(r"[а-яёa-z0-9-]+", term.lower())
+                )
+            )
+            for term in (category, subcategory)
+        )
+        if mentioned and category and category not in categories:
+            categories.append(category)
+    return " и ".join(categories) if categories else None
+
+
+def _catalog_result_has_positions(result: str) -> bool:
+    return any("SKU:" in line for line in result.splitlines())
+
+
 def grounded_search_reply(
     result: str, name: str | None = None, previous_reply: str | None = None
 ) -> str | None:

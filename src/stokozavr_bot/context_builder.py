@@ -52,7 +52,13 @@ def build_model_context(
         "missing_fields": missing_fields(profile),
         "deal_stage": infer_deal_stage(profile, intent),
         "returning": bool(profile.name and profile.product),
-        "interests": [profile.product] if profile.product else [],
+        "interests": [
+            value
+            for value in dict.fromkeys(
+                [*(profile.original_interests or []), profile.product, profile.current_interest]
+            )
+            if value
+        ],
         "recent_history": [_history_row(row) for row in rows],
     }
 
