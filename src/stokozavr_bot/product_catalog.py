@@ -326,7 +326,31 @@ def line_total_catalog_result(
         f"Производитель: {record.manufacturer}; Фасовка: {record.packaging}; Цена: {record.price}; "
         f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}"
     )
-    return raw + f"; Подтверждённый расчёт: {quote.human_line}", quote
+    allowed = " ".join(f"{amount} ₽" for amount in sorted(quote.allowed_amounts))
+    return raw + f"; Подтверждённый расчёт: {quote.human_line}; Разрешённые суммы: {allowed}", quote
+
+
+def composite_line_total_catalog_result(text: str) -> tuple[str, object] | None:
+    from stokozavr_bot.catalog_quotes import quote_explicit_lines
+
+    combined = quote_explicit_lines(text)
+    if combined is None:
+        return None
+    parts: list[str] = []
+    for quote in combined.lines:
+        record = quote.record
+        parts.append(
+            f"Категория: {record.category}; Подкатегория: {record.subcategory}; SKU: {record.sku}; "
+            f"Производитель: {record.manufacturer}; Фасовка: {record.packaging}; Цена: {record.price}; "
+            f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}; "
+            f"Подтверждённый расчёт: {quote.human_line}"
+        )
+    parts.append(
+        "Подтверждённый расчёт: итого "
+        f"{combined.total_amount} ₽; Разрешённые суммы: "
+        + " ".join(f"{amount} ₽" for amount in sorted(combined.allowed_amounts))
+    )
+    return "\n".join(parts), combined
 
 
 def _category_listing(files: list[tuple[str, str]]) -> str:

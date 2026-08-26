@@ -6,20 +6,29 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from .catalog_quotes import (
+    CompositeLineTotals,
+    LineTotalQuote,
+    _product_terms,
+    parse_requested_quantity,
+)
 from .closing import PENZA_PROMO_AMOUNTS, closing_reply, looks_like_ready_to_buy
 from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     UnitPriceQuote,
     catalog_categories_in_result,
+    composite_line_total_catalog_result,
     generated_price_list,
     grounded_quote_reply,
     grounded_search_reply,
     infer_catalog_interest,
+    line_total_catalog_result,
     named_catalog_item,
     recover_product_from_history,
     search,
     unit_price_catalog_result,
+    unit_price_quote,
 )
 from .repositories import CRMRepository
 
@@ -315,13 +324,16 @@ def is_unsafe_claim(text: str, catalog_result: str | None = None) -> bool:
     if not re.search(r"(?:\bцен\w*|\bстоимост\w*|₽|\bруб\w*)", lowered):
         return False
     claimed = [
-        re.sub(r"\s+", "", match) for match in re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", lowered)
+        _normalize_claim_amount(match)
+        for match in re.findall(r"(\d[\d\s]*(?:[.,]\d+)?)\s*(?:₽|руб)", lowered)
     ]
     if not claimed:
         return bool(re.search(r"(?:₽|\bруб\w*\b)", lowered))
     allowed = {
-        re.sub(r"\s+", "", value)
-        for value in re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", catalog_result or "", re.IGNORECASE)
+        _normalize_claim_amount(value)
+        for value in re.findall(
+            r"(\d[\d\s]*(?:[.,]\d+)?)\s*(?:₽|руб)", catalog_result or "", re.IGNORECASE
+        )
     } | {str(value) for value in PENZA_PROMO_AMOUNTS}
     return any(amount not in allowed for amount in claimed)
 
@@ -344,6 +356,15 @@ def _catalog_supports_claim(reply: str, catalog_result: str | None) -> bool:
         not in {"категория", "подкатегория", "производитель", "фасовка", "статус", "наличия"}
     )
     return has_status and has_product
+
+
+def _normalize_claim_amount(raw: str) -> str:
+    compact = re.sub(r"\s+", "", raw).replace(",", ".")
+    if "." in compact:
+        whole, fraction = compact.split(".", 1)
+        fraction = fraction.rstrip("0")
+        return f"{whole}.{fraction}" if fraction else whole
+    return compact.lstrip("0") or "0"
 
 
 def looks_like_volume(text: str) -> bool:
@@ -552,17 +573,105 @@ def _reject_turn(
     return None
 
 
+def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> str:
+    prefix = f"{name}, " if name else ""
+    record = quote.record
+    reply = (
+        f"{prefix}{quote.human_line} "
+        f"({record.price} за {record.packaging}; производитель — {record.manufacturer})"
+    )
+    piece_unit = {"банка": "шт", "бутылка": "шт", "шт": "шт"}.get(quote.requested_unit)
+    if piece_unit:
+        unit = unit_price_quote(record.subcategory, piece_unit)
+        if unit:
+            reply += f". {unit.unit_price}"
+    return reply + "."
+
+
+def _format_composite_reply(combined: CompositeLineTotals, name: str | None = None) -> str:
+    prefix = f"{name}, " if name else ""
+    lines = "; ".join(quote.human_line for quote in combined.lines)
+    return f"{prefix}{lines}. Итого {combined.total_amount} ₽."
+
+
+def _requested_quote_quantity(
+    text: str,
+    semantic: IntakeAnalysis | None,
+    client: ClientProfile,
+):
+    quantity = parse_requested_quantity(text)
+    if quantity is not None:
+        return quantity
+    if semantic and semantic.volume:
+        quantity = parse_requested_quantity(semantic.volume)
+        if quantity is not None:
+            return quantity
+    utterance = _utterance_search_key(text)
+    current = client.current_interest or client.product
+    if utterance and current and not _topics_overlap(utterance, current):
+        return None
+    if client.volume:
+        return parse_requested_quantity(client.volume)
+    return None
+
+
+def _topics_overlap(left: str, right: str) -> bool:
+    first = (left or "").strip().lower()
+    second = (right or "").strip().lower()
+    if not first or not second:
+        return False
+    if first in second or second in first:
+        return True
+    left_terms = set(_product_terms(first))
+    right_terms = set(_product_terms(second))
+    return bool(left_terms & right_terms)
+
+
+def _resolve_line_total_catalog(
+    text: str,
+    semantic: IntakeAnalysis | None,
+    client: ClientProfile,
+    catalog_query: str | None = None,
+) -> tuple[str, LineTotalQuote] | None:
+    quantity = _requested_quote_quantity(text, semantic, client)
+    if quantity is None:
+        return None
+    seen: set[str] = set()
+    for target in (
+        text,
+        _utterance_search_key(text),
+        semantic.target_product if semantic else None,
+        semantic.product if semantic else None,
+        catalog_query,
+        client.current_interest,
+        client.product,
+    ):
+        cleaned = (target or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        calculated = line_total_catalog_result(cleaned, quantity.raw)
+        if calculated:
+            return calculated
+    return None
+
+
 def _volume_grounded_reply(
     client: ClientProfile,
     catalog_result: str,
     previous_reply: str | None = None,
+    line_quote: LineTotalQuote | None = None,
 ) -> str | None:
-    if not client.volume:
-        return None
-    topic = client.current_interest or client.product or ""
-    quote = grounded_quote_reply(topic, client.name, client.volume, previous_reply)
-    if quote:
-        return quote
+    if line_quote:
+        return _format_line_total_reply(line_quote, client.name)
+    if client.volume:
+        topic = client.current_interest or client.product or ""
+        calculated = line_total_catalog_result(topic, client.volume) if topic else None
+        if calculated:
+            return _format_line_total_reply(calculated[1], client.name)
+        quote = grounded_quote_reply(topic, client.name, client.volume, previous_reply)
+        if quote:
+            return quote
     if _catalog_has_positions(catalog_result):
         return grounded_search_reply(catalog_result, client.name, previous_reply)
     return None
@@ -761,9 +870,7 @@ def _repair_reply_is_grounded(reply: str, catalog_result: str) -> bool:
     return any(word in reply.lower() for word in catalog_words)
 
 
-_COMPETITOR_MENTION_RE = re.compile(
-    r"конкурент\w*|сравн\w*|альтернатив\w*|вариант\w*", re.IGNORECASE
-)
+_COMPETITOR_MENTION_RE = re.compile(r"конкурент\w*|сравн\w*|альтернатив\w*", re.IGNORECASE)
 _COMPETITOR_SAFE_REPLY = "Актуальную информацию уточню и вернусь к вам."
 
 
@@ -1067,7 +1174,11 @@ class ConversationService:
         if looks_like_ready_to_buy(text) and client.name:
             return await self._handle_closing(client, history, message.text, now)
 
-        composite_catalog = _composite_order_catalog(text)
+        calculated_composite = composite_line_total_catalog_result(text)
+        composite_quote = calculated_composite[1] if calculated_composite else None
+        composite_catalog = (
+            calculated_composite[0] if calculated_composite else _composite_order_catalog(text)
+        )
         competitor_request = asks_for_competitor(text)
         search_key = catalog_query or _utterance_search_key(text)
         if not search_key:
@@ -1121,6 +1232,13 @@ class ConversationService:
                     catalog_result, unit_quote = calculated
                     client.current_interest = unit_quote.record.subcategory[:300]
 
+        line_quote = None
+        if unit_quote is None and composite_quote is None:
+            calculated_line = _resolve_line_total_catalog(text, semantic, client, catalog_query)
+            if calculated_line:
+                catalog_result, line_quote = calculated_line
+                client.current_interest = line_quote.record.subcategory[:300]
+
         catalog_empty_check = bool(
             client.product
             and catalog_result
@@ -1138,7 +1256,14 @@ class ConversationService:
             )
 
         if composite_catalog:
-            return await self._handle_ai(client, message.text, now, composite_catalog)
+            return await self._handle_ai(
+                client,
+                message.text,
+                now,
+                composite_catalog,
+                line_quote=line_quote,
+                composite_quote=composite_quote,
+            )
 
         if catalog_no_match:
             return await self._handle_ai(client, message.text, now, catalog_result)
@@ -1146,7 +1271,15 @@ class ConversationService:
         if is_qualified(client):
             client.status = "квалифицирован"
             await self.repository.save_client(client)
-            return await self._handle_ai(client, message.text, now, catalog_result, unit_quote)
+            return await self._handle_ai(
+                client,
+                message.text,
+                now,
+                catalog_result,
+                unit_quote,
+                line_quote,
+                composite_quote,
+            )
 
         if (
             captured
@@ -1216,6 +1349,20 @@ class ConversationService:
                 f"({record.packaging}, {record.price} за упаковку)."
             )
             return await self._finish(client, message.text, BotReply(reply), now)
+        if composite_quote:
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(_format_composite_reply(composite_quote, client.name)),
+                now,
+            )
+        if line_quote:
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(_format_line_total_reply(line_quote, client.name)),
+                now,
+            )
 
         catalog_reply = (
             None
@@ -1517,6 +1664,8 @@ class ConversationService:
         now: datetime,
         catalog_result: str | None = None,
         unit_quote: UnitPriceQuote | None = None,
+        line_quote: LineTotalQuote | None = None,
+        composite_quote: CompositeLineTotals | None = None,
     ) -> BotReply:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         catalog_no_match = _catalog_no_match_context(catalog_result)
@@ -1600,6 +1749,20 @@ class ConversationService:
                     f"({record.packaging}, {record.price} за упаковку)."
                 )
                 return await self._finish(client, user_message, BotReply(reply), now)
+            if composite_quote:
+                return await self._finish(
+                    client,
+                    user_message,
+                    BotReply(_format_composite_reply(composite_quote, client.name), delay=False),
+                    now,
+                )
+            if line_quote:
+                return await self._finish(
+                    client,
+                    user_message,
+                    BotReply(_format_line_total_reply(line_quote, client.name), delay=False),
+                    now,
+                )
             if _catalog_has_positions(catalog_result or ""):
                 recovery = await self._safe_repair(
                     client, history, user_message, "recovery_attempt_2", catalog_result or ""

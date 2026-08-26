@@ -106,19 +106,49 @@ class CompositeLineTotals:
 
 
 def parse_requested_quantity(text: str) -> RequestedQuantity | None:
-    match = re.search(
-        rf"(\d+(?:[.,]\d+)?)\s*({_QUANTITY_UNIT})",
-        (text or "").lower(),
-    )
-    if not match:
+    items = parse_requested_quantities(text)
+    return items[0][2] if items else None
+
+
+def parse_requested_quantities(text: str) -> list[tuple[int, int, RequestedQuantity]]:
+    found: list[tuple[int, int, RequestedQuantity]] = []
+    lowered = (text or "").lower()
+    for match in re.finditer(rf"(\d+(?:[.,]\d+)?)\s*({_QUANTITY_UNIT})", lowered):
+        if re.search(r"₽|руб", lowered[match.end() : match.end() + 4]):
+            continue
+        unit = _normalize_unit(match.group(2))
+        if unit is None:
+            continue
+        amount = _decimal(match.group(1))
+        if amount <= 0:
+            continue
+        found.append(
+            (
+                match.start(),
+                match.end(),
+                RequestedQuantity(amount=amount, unit=unit, raw=match.group(0)),
+            )
+        )
+    return found
+
+
+def quote_explicit_lines(text: str) -> CompositeLineTotals | None:
+    spans = parse_requested_quantities(text)
+    if len(spans) < 2:
         return None
-    unit = _normalize_unit(match.group(2))
-    if unit is None:
+    quotes: list[LineTotalQuote] = []
+    for index, (start, end, quantity) in enumerate(spans):
+        previous_end = spans[index - 1][1] if index else 0
+        next_start = spans[index + 1][0] if index + 1 < len(spans) else len(text)
+        after = text[end:next_start]
+        before = text[previous_end:start]
+        nearby = after if _product_terms(after) else before
+        quoted = line_total_quote(nearby, quantity.raw)
+        if isinstance(quoted, LineTotalQuote):
+            quotes.append(quoted)
+    if len(quotes) < 2:
         return None
-    amount = _decimal(match.group(1))
-    if amount <= 0:
-        return None
-    return RequestedQuantity(amount=amount, unit=unit, raw=text.strip())
+    return combine_line_totals(*quotes)
 
 
 def parse_packaging(packaging: str) -> PackagingSpec | None:
@@ -367,7 +397,20 @@ def _plural_container(container: str, count: int) -> str:
 
 
 def _product_terms(product: str) -> list[str]:
-    skip = set(_UNIT_ALIASES) | {"за", "это", "сколько", "цена", "цену"}
+    skip = set(_UNIT_ALIASES) | {
+        "за",
+        "это",
+        "сколько",
+        "цена",
+        "цену",
+        "нужно",
+        "надо",
+        "будет",
+        "хочу",
+        "ещё",
+        "еще",
+        "есть",
+    }
     terms: list[str] = []
     for token in re.findall(r"[\w-]+", (product or "").lower()):
         if len(token) < 3 or token.isdigit() or token in skip:
@@ -377,9 +420,57 @@ def _product_terms(product: str) -> list[str]:
     return terms
 
 
+def _stem(token: str) -> str:
+    cleaned = token.lower().replace("ё", "е")
+    if len(cleaned) <= 4:
+        return cleaned
+    for ending in (
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ими",
+        "ыми",
+        "ой",
+        "ей",
+        "ий",
+        "ый",
+        "ая",
+        "яя",
+        "ое",
+        "ее",
+        "ые",
+        "ие",
+        "ов",
+        "ев",
+        "ах",
+        "ях",
+        "ом",
+        "ем",
+        "ы",
+        "и",
+        "а",
+        "я",
+        "у",
+        "ю",
+        "е",
+        "о",
+    ):
+        if cleaned.endswith(ending) and len(cleaned) - len(ending) >= 4:
+            return cleaned[: -len(ending)]
+    return cleaned
+
+
+def _term_in_haystack(term: str, haystack: str) -> bool:
+    if term in haystack:
+        return True
+    stem = _stem(term)
+    return len(stem) >= 4 and stem in haystack
+
+
 def _record_score(record: CatalogRecord, terms: Iterable[str]) -> int:
     haystack = f"{record.category} {record.subcategory} {record.sku} {record.manufacturer}".lower()
-    return sum(1 for term in terms if term in haystack)
+    return sum(1 for term in terms if _term_in_haystack(term, haystack))
 
 
 def _price_decimal(price: str) -> Decimal | None:

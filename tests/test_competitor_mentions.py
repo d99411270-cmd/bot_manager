@@ -49,8 +49,8 @@ def test_two_competitor_answers_cannot_be_consecutive():
     profile = client()
 
     first = limit_competitor_mentions(profile, "Сравню с конкурентом.")
-    second = limit_competitor_mentions(profile, "Ещё один вариант.")
+    second = limit_competitor_mentions(profile, "Ещё один конкурент.")
 
     assert "конкурент" not in first.lower()
-    assert "вариант" not in second.lower()
+    assert "конкурент" not in second.lower()
     assert profile.competitor_mentions == 0

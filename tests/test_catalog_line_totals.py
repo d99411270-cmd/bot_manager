@@ -34,6 +34,15 @@ def test_line_total_quote_severnaya_kaplya_10_packs_is_8900():
     assert "890" in quote.allowed_amounts
 
 
+def test_line_total_quote_matches_inflected_manufacturer_in_quantity_question():
+    quote = line_total_quote("10 упаковок Северной Капли это сколько?", "10 упаковок")
+
+    assert not isinstance(quote, QuoteFailure)
+    assert quote.record.sku == "SOK-APPLE-001"
+    assert quote.pack_count == 10
+    assert quote.total == "8900 ₽"
+
+
 def test_line_total_quote_corn_36_cans_is_three_packs_and_allows_unit_price():
     quote = line_total_quote("кукуруза сладкая", "36 банок")
 
@@ -179,6 +188,19 @@ def test_client_money_strings_are_not_treated_as_catalog_quantity():
     result = line_total_quote("рожки", "10000 ₽")
     assert isinstance(result, QuoteFailure)
     assert result.reason == "invalid_quantity"
+
+
+def test_quote_explicit_lines_potato_nets_and_horns_packs():
+    from stokozavr_bot.catalog_quotes import quote_explicit_lines
+
+    combined = quote_explicit_lines(
+        "это не телефон, это объём. посчитайте итого: 4 сетки картофеля и 10 упаковок рожков"
+    )
+
+    assert combined is not None
+    assert combined.total_amount == 6900
+    assert "6900" in combined.allowed_amounts
+    assert {line.record.sku for line in combined.lines} == {"VEG-POTATO-001", "PASTA-HORNS-001"}
 
 
 def test_quantity_parser_is_general_not_phrase_specific():

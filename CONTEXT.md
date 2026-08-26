@@ -7,7 +7,7 @@
 ## Текущее состояние
 
 - Python / aiogram 3, long polling.
-- `ConversationService` — оркестратор, не анкета. DeepSeek пишет клиенту; код валидирует и сохраняет факты.
+- `ConversationService` — оркестратор, не анкета. DeepSeek пишет клиенту; код валидирует и сохраняет факты. Slice C: structured line totals и grounded recovery вшиты в живой диалог.
 - `/start` нового клиента — точный `START_TEXT`. Дальше любое сообщение, кроме явного валидного телефона/контакта, идёт в AI-менеджера.
 - `analyze_intake` остаётся компактным JSON-экстрактором сущностей. Клиентский ответ на вопрос / отказ / оффтоп / «кто вы» / ассортимент идёт через `respond()` + prompt bundle + tool `search_catalog`.
 - Вопрос про ассортимент, фрукты, консервацию или цену не подменяется шаблоном `PRODUCT_QUESTION` / `PRODUCT_ASSORTMENT`: `ConversationService` детерминированно вызывает локальный `search_catalog` до AI. Результат передаётся DeepSeek для естественной формулировки; при отбраковке/ошибке используется одноразовый repair-запрос, затем безопасный каталоговый fallback с товарами, производителями, фасовками, ценами и наличием. Для multi-intent сначала покрываются прямыми ответами все вопросы клиента о работе компании, затем допускается максимум один нужный вопрос.
@@ -52,13 +52,19 @@
 
 ## Проверка
 
-- На 2026-08-26 (TDD slice A: state/topic/context QA round-1, без push/deploy):
+- На 2026-08-26 (TDD slice C: structured quotes в живом диалоге, без push/deploy):
+- `PYTHONPATH=src /home/hermes/projects/stokozavr-telegram-bot/.venv/bin/pytest -q` — `372 passed`.
+- `ruff check .` — `All checks passed!`
+- `ruff format --check .` — `62 files already formatted`.
+- `git diff --check` — без ошибок.
+- Коммит локальный: `Ground catalog answers in structured quotes`. Пуш и деплой **не** выполнялись.
+
+Ранее на 2026-08-26 (TDD slice A: state/topic/context QA round-1, без push/deploy):
 
 - `.venv/bin/pytest -q` — `328 passed`.
 - `.venv/bin/ruff check .` — `All checks passed!`.
 - `.venv/bin/ruff format --check .` — `59 files already formatted`.
 - `git diff --check` — без ошибок.
-- Изменения **не** закоммичены. Пуш и деплой **не** выполнялись.
 
 Ранее на 2026-08-26 (изолированный QA-стенд для Grok-тестеров, без product behaviour):
 
@@ -87,7 +93,7 @@
 
 ## Дальше
 
-Slice A (state/topic/context) локально зелёный, uncommitted. Slice B (line totals / 2×820 / 4 сетки = 3000 ₽), generic fallback как отдельный корень, прайс, конкуренты, closing/amoCRM — не в этом срезе.
+Slice C (structured quotes / grounded recovery) локально закоммичен на `qa-slice-c`. Не в этом срезе: price-list pending machine, closing/amoCRM, name-frequency, финальная политика счётчика конкурентов, живой rerun персон P1–P8.
 
 Локально есть выдуманный тестовый каталог и tool-calling. Реальные коммерческие данные не добавлялись. На Beget ещё старый Иван.
 
