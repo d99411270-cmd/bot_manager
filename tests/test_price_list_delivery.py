@@ -5,7 +5,7 @@ import pytest
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.product_catalog import generated_price_list
 from stokozavr_bot.repositories import InMemoryCRMRepository
-from stokozavr_bot.service import EMAIL_QUESTION, ConversationService
+from stokozavr_bot.service import EMAIL_QUESTION, PRODUCT_QUESTION, ConversationService
 
 
 class NoAI:
@@ -151,9 +151,28 @@ async def test_email_after_plain_price_request_is_saved_and_does_not_claim_send(
 
     assert first.text == EMAIL_QUESTION
     assert saved.email == "anna@shop.ru"
-    assert saved.price_list_requested is False
+    assert saved.price_list_requested is True
+    assert PRODUCT_QUESTION not in second.text
     assert second.attachment_content is None
     assert "отправ" not in second.text.lower()
+    assert "почт" not in second.text.lower() or "записал" in second.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_chat_here_after_email_keeps_pending_and_sends_attachment(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(ClientProfile(telegram_id=708, name="Анна"))
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    await service.handle(IncomingMessage(708, None, "Давайте прайс"))
+    await service.handle(IncomingMessage(708, None, "anna@shop.ru"))
+    result = await service.handle(IncomingMessage(708, None, "а можно прямо в чат?"))
+    saved = await repository.get_client(708)
+
+    assert result.attachment_filename == "stokozavr-price-list.md"
+    assert result.attachment_content == generated_price_list()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
 
 
 @pytest.mark.asyncio
@@ -167,3 +186,58 @@ async def test_chat_followup_recovers_pending_price_request_from_history(now):
 
     assert result.attachment_content == generated_price_list()
     assert result.attachment_filename == "stokozavr-price-list.md"
+
+
+@pytest.mark.parametrize("message_text", ["прайс повторно не надо", "файл уже прислали"])
+@pytest.mark.asyncio
+async def test_price_list_refusal_cancels_pending_without_new_request(now, message_text):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(
+            telegram_id=709,
+            name="Анна",
+            phone="+799****4567",
+            price_list_requested=True,
+        )
+    )
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(709, None, message_text))
+    saved = await repository.get_client(709)
+
+    assert saved.price_list_requested is False
+    assert result.attachment_content is None
+    assert result.attachment_filename is None
+    assert PRODUCT_QUESTION not in result.text
+
+
+@pytest.mark.asyncio
+async def test_explicit_price_file_in_telegram_still_sends_attachment(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(ClientProfile(telegram_id=710, name="Анна", phone="+799****4567"))
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(710, None, "прайс файлом сюда в Telegram"))
+    saved = await repository.get_client(710)
+
+    assert result.attachment_filename == "stokozavr-price-list.md"
+    assert result.attachment_content == generated_price_list()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_without_price_request_skips_contact_and_sends_no_file(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(telegram_id=711, name="Анна", status="ожидает телефон")
+    )
+    service = ConversationService(repository, AssortmentAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(711, None, "почту не дам, пишите в этот чат"))
+    saved = await repository.get_client(711)
+
+    assert saved.contact_skipped is True
+    assert result.attachment_content is None
+    assert result.attachment_filename is None
+    assert saved.price_list_requested is False

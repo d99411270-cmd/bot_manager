@@ -189,7 +189,9 @@ def prefers_chat_here(text: str) -> bool:
     lowered = text.strip().lower()
     return bool(
         re.search(
-            r"пишите сюда|сюда просто|здесь пишите|здесь общ|без телефона|только (?:здесь|тут|в телеграм)",
+            r"пишите сюда|сюда просто|здесь пишите|здесь общ|без телефона|"
+            r"только (?:здесь|тут|в телеграм)|пишите в (?:этот\s+)?чат|"
+            r"в этот чат",
             lowered,
         )
     )
@@ -230,7 +232,19 @@ def should_offer_price_list(text: str) -> bool:
 
 
 def asks_for_price_list(text: str) -> bool:
+    if cancels_price_list(text):
+        return False
     return bool(re.search(r"\bпрайс(?:-?лист)?\b|\bкаталог\b", text.lower()))
+
+
+def cancels_price_list(text: str) -> bool:
+    lowered = text.lower()
+    mentions_list = bool(re.search(r"\bпрайс(?:-?лист)?\b|\bкаталог\b|\bфайл\b", lowered))
+    if not mentions_list:
+        return False
+    already_sent = bool(re.search(r"уже (?:прислал|отправил|выслал)|повторно не", lowered))
+    refused = bool(re.search(r"не надо|не нужн", lowered))
+    return already_sent or refused
 
 
 def asks_for_price_list_in_chat(text: str) -> bool:
@@ -753,6 +767,7 @@ def _is_non_product_intake_text(text: str) -> bool:
             _is_generic_fallback_reply(text),
             _is_catalog_or_price_question(text),
             asks_for_price_list(text),
+            cancels_price_list(text),
             prefers_chat_here(text),
             asks_about_pending_update(text),
             is_irritated(text),
@@ -978,6 +993,8 @@ class ConversationService:
         """Let Telegram show typing only while an actual AI request is in flight."""
         if text.strip().lower() == "/start":
             return False
+        if cancels_price_list(text):
+            return False
         if asks_for_price_list(text):
             return False
         if (
@@ -1019,10 +1036,8 @@ class ConversationService:
             email = normalize_email(text)
             if email:
                 client.email = email
-                client.price_list_requested = False
-                client.status = "уточнение продукта"
                 reply_text = (
-                    f"Спасибо, {client.name}.\n{PRODUCT_QUESTION}" if client.name else NAME_QUESTION
+                    f"Спасибо, {client.name}. Почту записал." if client.name else NAME_QUESTION
                 )
                 return await self._finish(
                     client,
@@ -1105,6 +1120,15 @@ class ConversationService:
         pending_price_list = client.price_list_requested or (
             not client.price_list_sent_at and _price_list_pending_from_history(history)
         )
+        if cancels_price_list(text):
+            client.price_list_requested = False
+            return await self._finish(
+                client,
+                message.text,
+                BotReply("Хорошо, без прайса."),
+                now,
+                add_price_list_offer=False,
+            )
         if asks_for_price_list_in_chat(text) or (pending_price_list and _mentions_chat_here(text)):
             client.price_list_requested = True
             return await self._finish(
