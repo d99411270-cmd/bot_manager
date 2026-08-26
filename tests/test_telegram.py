@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
 import pytest
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import BufferedInputFile, ReplyKeyboardRemove
 
 from stokozavr_bot.models import BotReply, ClientProfile
+from stokozavr_bot.repositories import InMemoryCRMRepository
+from stokozavr_bot.service import ConversationService
 from stokozavr_bot.telegram import create_router, delay_range_for_text, reply_markup_for_response
 
 
@@ -71,3 +73,114 @@ async def test_adapter_removes_legacy_keyboard_on_normal_and_rejected_contact_re
     await callback(message, FakeState())
 
     assert isinstance(message.answers[0][1]["reply_markup"], ReplyKeyboardRemove)
+
+
+class AttachmentService(FakeService):
+    async def handle(self, incoming):
+        return BotReply(
+            "Отправляю актуальный прайс прямо сюда.",
+            attachment_content="# price",
+            attachment_filename="stokozavr-price-list.md",
+        )
+
+
+class TrackingAttachmentService(AttachmentService):
+    def __init__(self):
+        self.marked = []
+
+    async def mark_price_list_sent(self, telegram_id):
+        self.marked.append(telegram_id)
+
+
+class DocumentMessage(FakeMessage):
+    def __init__(self, text="текст"):
+        super().__init__()
+        self.text = text
+        self.documents = []
+        self.chat = SimpleNamespace(id=1)
+
+    async def answer_document(self, document, **kwargs):
+        self.documents.append((document, kwargs))
+
+
+@pytest.mark.asyncio
+async def test_router_sends_reply_attachment_as_buffered_telegram_document():
+    repository = FakeRepository()
+    callback = create_router(AttachmentService(), repository).message.handlers[0].callback
+    message = DocumentMessage()
+
+    await callback(message, FakeState())
+
+    assert len(message.documents) == 1
+    document, kwargs = message.documents[0]
+    assert isinstance(document, BufferedInputFile)
+    assert document.data == b"# price"
+    assert document.filename == "stokozavr-price-list.md"
+    assert kwargs["caption"] == "Отправляю актуальный прайс прямо сюда."
+    assert kwargs["reply_markup"] == ReplyKeyboardRemove()
+
+
+@pytest.mark.asyncio
+async def test_router_marks_price_list_sent_only_after_document_success():
+    service = TrackingAttachmentService()
+    repository = FakeRepository()
+    callback = create_router(service, repository).message.handlers[0].callback
+    message = DocumentMessage()
+
+    await callback(message, FakeState())
+
+    assert service.marked == [1]
+
+
+class FailingDocumentMessage(DocumentMessage):
+    async def answer_document(self, document, **kwargs):
+        raise RuntimeError("transport failure")
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_mark_or_claim_success_when_document_send_fails():
+    service = TrackingAttachmentService()
+    repository = FakeRepository()
+    callback = create_router(service, repository).message.handlers[0].callback
+    message = FailingDocumentMessage()
+
+    await callback(message, FakeState())
+
+    assert service.marked == []
+    assert message.answers == []
+
+
+class DirectPriceListAI:
+    async def analyze_intake(self, profile, history, message):
+        raise AssertionError("explicit price-list requests must not call AI")
+
+    async def respond(self, profile, history, message):
+        raise AssertionError("explicit price-list requests must not call AI")
+
+
+@pytest.mark.asyncio
+async def test_real_service_records_price_list_success_after_router_document_send():
+    repository = InMemoryCRMRepository()
+    await repository.save_client(ClientProfile(telegram_id=1, name="Анна", phone="+799****4567"))
+    service = ConversationService(repository, DirectPriceListAI())
+    callback = create_router(service, repository).message.handlers[0].callback
+
+    await callback(DocumentMessage(text="Прайс в чат"), FakeState())
+    saved = await repository.get_client(1)
+
+    assert saved.price_list_requested is False
+    assert saved.price_list_sent_at is not None
+
+
+@pytest.mark.asyncio
+async def test_real_service_keeps_price_list_pending_when_router_document_send_fails():
+    repository = InMemoryCRMRepository()
+    await repository.save_client(ClientProfile(telegram_id=1, name="Анна", phone="+799****4567"))
+    service = ConversationService(repository, DirectPriceListAI())
+    callback = create_router(service, repository).message.handlers[0].callback
+
+    await callback(FailingDocumentMessage(text="Прайс в чат"), FakeState())
+    saved = await repository.get_client(1)
+
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None

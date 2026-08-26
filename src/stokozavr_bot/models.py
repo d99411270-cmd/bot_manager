@@ -31,6 +31,8 @@ class ClientProfile:
     competitor_mentions: int = 0
     competitor_last_reply: bool = False
     phone_correction_pending: bool = False
+    price_list_requested: bool = False
+    price_list_sent_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -54,6 +56,8 @@ class BotReply:
     text: str
     request_contact: bool = False
     delay: bool = False
+    attachment_content: str | None = None
+    attachment_filename: str | None = None
 
 
 @dataclass(slots=True)

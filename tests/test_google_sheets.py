@@ -120,6 +120,27 @@ async def test_google_sheets_persists_email_and_skipped_contact():
 
 
 @pytest.mark.asyncio
+async def test_google_sheets_persists_price_list_request_and_success_timestamp():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 26, 12, tzinfo=timezone.utc)
+    client = ClientProfile(
+        telegram_id=70,
+        name="Анна",
+        price_list_requested=True,
+        price_list_sent_at=now,
+    )
+
+    await repo.save_client(client)
+    loaded = await repo.get_client(70)
+
+    assert loaded.price_list_requested is True
+    assert loaded.price_list_sent_at == now
+    assert "Прайс запрошен" in book.sheets["Клиенты"].rows[1][-1]
+    assert f"Прайс отправлен: {now.isoformat()}" in book.sheets["Клиенты"].rows[1][-1]
+
+
+@pytest.mark.asyncio
 async def test_google_sheets_stores_surname_separately():
     book = FakeBook()
     repo = GoogleSheetsCRMRepository(book)

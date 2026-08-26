@@ -11,6 +11,7 @@ from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     UnitPriceQuote,
+    generated_price_list,
     grounded_search_reply,
     infer_catalog_interest,
     recover_product_from_history,
@@ -201,7 +202,35 @@ def should_offer_price_list(text: str) -> bool:
     )
 
 
+def asks_for_price_list(text: str) -> bool:
+    return bool(re.search(r"\bпрайс(?:-?лист)?\b|\bкаталог\b", text.lower()))
+
+
+def asks_for_price_list_in_chat(text: str) -> bool:
+    return asks_for_price_list(text) and _mentions_chat_here(text)
+
+
+def _mentions_chat_here(text: str) -> bool:
+    return bool(
+        re.search(
+            r"прямо\s+(?:в\s+)?(?:чат|сюда|тут|здесь)|"
+            r"\b(?:сюда|тут|здесь)\b|\bв\s+(?:этот\s+)?чат\b|"
+            r"\bв\s+(?:телеграм(?:е|м)?|telegram)\b",
+            text.lower(),
+        )
+    )
+
+
+def _price_list_pending_from_history(history: list[HistoryEntry]) -> bool:
+    if not history:
+        return False
+    latest = history[-1]
+    return asks_for_price_list(latest.user_message) and "почт" in latest.assistant_message.lower()
+
+
 PRICE_LIST_OFFER = "Могу проконсультировать по товарам или выслать актуальный прайс."
+PRICE_LIST_CHAT_REPLY = "Отправляю актуальный прайс прямо сюда."
+PRICE_LIST_FILENAME = "stokozavr-price-list.md"
 
 
 def _composite_order_catalog(text: str) -> str | None:
@@ -505,6 +534,14 @@ class ConversationService:
         """Let Telegram show typing only while an actual AI request is in flight."""
         if text.strip().lower() == "/start":
             return False
+        if asks_for_price_list(text):
+            return False
+        if (
+            client
+            and client.price_list_requested
+            and (normalize_email(text) or _mentions_chat_here(text))
+        ):
+            return False
         if not client or not client.name:
             return True
         if waiting_email(client):
@@ -534,6 +571,22 @@ class ConversationService:
         invalid_phone = invalid_phone_length(message.text)
         phone_attempt = phone_digit_attempt(message.contact_phone or message.text)
         landline = normalize_landline(message.contact_phone or text)
+        if client.price_list_requested and not asks_for_price_list_in_chat(text):
+            email = normalize_email(text)
+            if email:
+                client.email = email
+                client.price_list_requested = False
+                client.status = "уточнение продукта"
+                reply_text = (
+                    f"Спасибо, {client.name}.\n{PRODUCT_QUESTION}" if client.name else NAME_QUESTION
+                )
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply(reply_text),
+                    now,
+                    add_price_list_offer=False,
+                )
         if client.name and not client.phone and landline and not message.contact_phone:
             client.landline = landline
             client.phone_correction_pending = True
@@ -599,6 +652,34 @@ class ConversationService:
     ) -> BotReply:
         text = message.text.strip()
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
+        pending_price_list = client.price_list_requested or (
+            not client.price_list_sent_at and _price_list_pending_from_history(history)
+        )
+        if asks_for_price_list_in_chat(text) or (pending_price_list and _mentions_chat_here(text)):
+            client.price_list_requested = True
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(
+                    PRICE_LIST_CHAT_REPLY,
+                    delay=False,
+                    attachment_content=generated_price_list(),
+                    attachment_filename=PRICE_LIST_FILENAME,
+                ),
+                now,
+                add_price_list_offer=False,
+            )
+        if asks_for_price_list(text):
+            client.price_list_requested = True
+            if client.name and not has_contact(client):
+                client.status = "ожидает почту"
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(EMAIL_QUESTION, delay=False),
+                now,
+                add_price_list_offer=False,
+            )
         semantic = await self._safe_analyze(client, history, message.text)
         invalid_phone = invalid_phone_length(message.text)
         if invalid_phone and semantic is not None:
@@ -1241,20 +1322,42 @@ class ConversationService:
         if is_qualified(client) and client.status not in {"готов к заказу", "получил предложение"}:
             client.status = "квалифицирован"
 
+    async def mark_price_list_sent(self, telegram_id: int, sent_at: datetime | None = None) -> None:
+        client = await self.repository.get_client(telegram_id)
+        if client is None:
+            return
+        client.price_list_requested = False
+        client.price_list_sent_at = sent_at or self.clock()
+        await self.repository.save_client(client)
+
     async def _finish(
-        self, client: ClientProfile, user_message: str, reply: BotReply, now: datetime
+        self,
+        client: ClientProfile,
+        user_message: str,
+        reply: BotReply,
+        now: datetime,
+        *,
+        add_price_list_offer: bool = True,
     ) -> BotReply:
         apply_followup_rules(client, user_message, reply.text, now, self.followup_delay)
         safe_text = limit_competitor_mentions(
             client, reply.text, allowed=asks_for_competitor(user_message)
         )
         if (
-            should_offer_price_list(user_message)
+            add_price_list_offer
+            and should_offer_price_list(user_message)
+            and not client.price_list_sent_at
             and "актуальный прайс" not in safe_text.lower()
             and not _is_generic_fallback_reply(safe_text)
         ):
             safe_text = PRICE_LIST_OFFER + "\n\n" + safe_text
-        reply = BotReply(safe_text, delay=reply.delay)
+        reply = BotReply(
+            safe_text,
+            request_contact=reply.request_contact,
+            delay=reply.delay,
+            attachment_content=reply.attachment_content,
+            attachment_filename=reply.attachment_filename,
+        )
         if reply_quoted_price(reply.text) and client.status != "готов к заказу":
             client.status = "получил предложение"
         await self.repository.save_client(client)

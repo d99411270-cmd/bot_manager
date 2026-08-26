@@ -136,6 +136,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     comment = _text(row.get("комментарии")) or ""
     volume, email, budget, skipped, last_name, extra = _parse_comment(comment)
     due, sent, extra = _split_followup(extra)
+    price_list_requested, price_list_sent_at, extra = _split_price_list_state(extra)
     return ClientProfile(
         telegram_id=telegram_id,
         username=_text(row.get("username")),
@@ -155,6 +156,8 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         followup_due_at=due,
         followup_sent=sent,
         needs_human="Нужен менеджер" in extra,
+        price_list_requested=price_list_requested,
+        price_list_sent_at=price_list_sent_at,
     )
 
 
@@ -209,6 +212,20 @@ def _split_followup(extra: str) -> tuple[datetime | None, bool, str]:
     return due, sent, " | ".join(kept)
 
 
+def _split_price_list_state(extra: str) -> tuple[bool, datetime | None, str]:
+    requested = False
+    sent_at = None
+    kept: list[str] = []
+    for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        if part == "Прайс запрошен":
+            requested = True
+        elif part.startswith("Прайс отправлен: "):
+            sent_at = _date(part.removeprefix("Прайс отправлен: "))
+        else:
+            kept.append(part)
+    return requested, sent_at, " | ".join(kept)
+
+
 def _build_comment(client: ClientProfile) -> str:
     parts: list[str] = []
     if client.volume:
@@ -223,6 +240,10 @@ def _build_comment(client: ClientProfile) -> str:
         parts.append(f"Напомнить: {client.followup_due_at.isoformat()}")
     if client.followup_sent:
         parts.append("Напоминание отправлено")
+    if client.price_list_requested:
+        parts.append("Прайс запрошен")
+    if client.price_list_sent_at:
+        parts.append(f"Прайс отправлен: {client.price_list_sent_at.isoformat()}")
     if client.needs_human:
         parts.append("Нужен менеджер")
     if client.original_interests:
@@ -230,6 +251,7 @@ def _build_comment(client: ClientProfile) -> str:
     if client.current_interest:
         parts.append(f"Текущий интерес: {client.current_interest}")
     extra = _split_followup(_parse_comment(client.comment or "")[5])[2]
+    extra = _split_price_list_state(extra)[2]
     if client.last_name:
         parts.append(f"Фамилия: {client.last_name}")
     if client.budget is not None:

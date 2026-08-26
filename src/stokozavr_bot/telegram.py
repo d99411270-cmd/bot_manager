@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import BufferedInputFile, Message, ReplyKeyboardRemove
 from aiogram.utils.chat_action import ChatActionSender
 
 from .models import IncomingMessage
 from .repositories import CRMRepository
 from .service import ConversationService
+
+logger = logging.getLogger(__name__)
 
 
 class ClientJourney(StatesGroup):
@@ -82,6 +85,32 @@ def create_router(
         else:
             await state.set_state(ClientJourney.waiting_name)
 
+        if reply.attachment_content is not None:
+            try:
+                await message.answer_document(
+                    BufferedInputFile(
+                        reply.attachment_content.encode("utf-8"),
+                        filename=reply.attachment_filename or "attachment.txt",
+                    ),
+                    caption=reply.text,
+                    reply_markup=reply_markup_for_response(),
+                )
+            except Exception:  # noqa: BLE001 - isolate Telegram transport failures
+                logger.warning(
+                    "Telegram attachment send failed for telegram_id=%s",
+                    message.from_user.id,
+                )
+                return
+            mark_price_list_sent = getattr(service, "mark_price_list_sent", None)
+            if callable(mark_price_list_sent):
+                try:
+                    await mark_price_list_sent(message.from_user.id)
+                except Exception:  # noqa: BLE001 - state persistence must not crash polling
+                    logger.warning(
+                        "Telegram attachment success state save failed for telegram_id=%s",
+                        message.from_user.id,
+                    )
+            return
         await message.answer(reply.text, reply_markup=reply_markup_for_response())
 
     router.message.register(process, CommandStart())
