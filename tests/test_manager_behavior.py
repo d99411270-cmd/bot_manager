@@ -207,16 +207,16 @@ async def test_large_volume_is_accepted_after_contact(now):
     service = ConversationService(
         repo,
         SemanticAI(
-            [analysis("provide_data", product="крупы", volume="2 тонны")],
+            [analysis("provide_data", product="макароны", volume="2 тонны")],
             [AiTurn(reply="Спасибо, зафиксировал крупный объём.")],
         ),
         clock=lambda: now,
     )
 
-    result = await service.handle(IncomingMessage(9, None, "Крупы, 2 тонны"))
+    result = await service.handle(IncomingMessage(9, None, "Макароны, 2 тонны"))
     saved = await repo.get_client(9)
 
-    assert saved.product == "крупы"
+    assert saved.product == "макароны"
     assert saved.volume == "2 тонны"
     assert saved.status == "квалифицирован"
     assert result.text == "Спасибо, зафиксировал крупный объём."
@@ -435,7 +435,7 @@ async def test_handle_ai_saves_new_product_and_volume(now):
             telegram_id=103,
             name="Анна",
             phone="+79991234567",
-            product="оливки",
+            product="макароны",
             volume="10 коробок",
             status="квалифицирован",
         )

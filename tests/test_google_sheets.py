@@ -162,6 +162,31 @@ async def test_google_sheets_stores_surname_separately():
 
 
 @pytest.mark.asyncio
+async def test_google_sheets_persists_catalog_no_match_query_without_product():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    client = ClientProfile(
+        telegram_id=71,
+        name="Энрике",
+        phone="+799****0001",
+        status="уточнение продукта",
+        catalog_no_match_query="наполнитель для кошачьего туалета турецкий",
+        comment="важный клиент",
+    )
+
+    await repo.save_client(client)
+    loaded = await repo.get_client(71)
+
+    assert loaded.product is None
+    assert loaded.catalog_no_match_query == "наполнитель для кошачьего туалета турецкий"
+    assert loaded.needs_human is False
+    assert (
+        "Товар не найден: наполнитель для кошачьего туалета турецкий"
+        in (book.sheets["Клиенты"].rows[1][-1])
+    )
+
+
+@pytest.mark.asyncio
 async def test_google_sheets_repository_appends_and_limits_history():
     book = FakeBook()
     repo = GoogleSheetsCRMRepository(book)

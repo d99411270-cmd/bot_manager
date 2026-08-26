@@ -21,7 +21,7 @@ class FakeAI:
             "Анна": IntakeAnalysis("provide_data", name="Анна"),
             "123": IntakeAnalysis("provide_data", phone="123"),
             "оливки": IntakeAnalysis("provide_data", product="оливки"),
-            "аджика": IntakeAnalysis("provide_data", product="аджика"),
+            "макароны": IntakeAnalysis("provide_data", product="макароны"),
             "20 коробок": IntakeAnalysis("provide_data", volume="20 коробок"),
         }
         return values.get(message, IntakeAnalysis("offtopic"))
@@ -55,7 +55,7 @@ async def test_first_contact_requires_name_phone_product_and_volume_before_ai(no
     assert "продукц" in accepted.text.lower()
     assert not ai.calls
 
-    product = await service.handle(IncomingMessage(10, "buyer", "оливки"))
+    product = await service.handle(IncomingMessage(10, "buyer", "макароны"))
     assert "объём" in product.text.lower()
     assert not ai.calls
 
@@ -65,7 +65,7 @@ async def test_first_contact_requires_name_phone_product_and_volume_before_ai(no
     profile = await repo.get_client(10)
     assert profile.name == "Анна"
     assert profile.phone == normalize_phone("+7 999 123-45-67")
-    assert profile.product == "оливки"
+    assert profile.product == "макароны"
     assert profile.volume == "20 коробок"
     assert profile.status == "квалифицирован"
 
@@ -77,14 +77,14 @@ async def test_product_and_volume_make_client_qualified_and_save_history(now):
     ai = FakeAI([AiTurn(reply="Спасибо, передаю менеджеру.")])
     service = ConversationService(repo, ai, clock=lambda: now)
 
-    first = await service.handle(IncomingMessage(7, "ivan", "аджика"))
+    first = await service.handle(IncomingMessage(7, "ivan", "макароны"))
     result = await service.handle(IncomingMessage(7, "ivan", "20 коробок"))
 
     assert "объём" in first.text.lower()
     assert result.text == "Спасибо, передаю менеджеру."
     client = await repo.get_client(7)
     assert (client.product, client.volume, client.status) == (
-        "аджика",
+        "макароны",
         "20 коробок",
         "квалифицирован",
     )

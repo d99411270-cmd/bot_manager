@@ -33,6 +33,7 @@ class ClientProfile:
     phone_correction_pending: bool = False
     price_list_requested: bool = False
     price_list_sent_at: datetime | None = None
+    catalog_no_match_query: str | None = None
 
 
 @dataclass(slots=True)

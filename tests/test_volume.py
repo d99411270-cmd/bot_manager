@@ -5,6 +5,7 @@ import pytest
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import (
+    FALLBACK,
     VOLUME_QUESTION,
     ConversationService,
     extract_volume,
@@ -115,7 +116,7 @@ async def test_explicit_budget_is_saved_as_semantic_fact_without_code_calculatio
     saved = await repo.get_client(4)
 
     assert saved.budget == 10000
-    assert result.text == "Уточню цену и вернусь с предложением."
+    assert result.text == FALLBACK
     assert "11 упаковок" not in result.text
 
 

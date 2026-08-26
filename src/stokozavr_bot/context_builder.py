@@ -24,6 +24,7 @@ _PROFILE_FIELDS = (
     "original_interests",
     "current_interest",
     "needs_human",
+    "catalog_no_match_query",
 )
 
 

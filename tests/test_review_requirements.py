@@ -28,7 +28,7 @@ class FakeAI:
     async def analyze_intake(self, profile, history, message):
         values = {
             "Анна": IntakeAnalysis("provide_data", name="Анна"),
-            "Оливки без косточки": IntakeAnalysis("provide_data", product="Оливки без косточки"),
+            "макароны": IntakeAnalysis("provide_data", product="макароны"),
             "20 коробок": IntakeAnalysis("provide_data", volume="20 коробок"),
         }
         return values.get(message, IntakeAnalysis("offtopic"))
@@ -99,13 +99,13 @@ async def test_code_enforces_product_then_volume_without_ai(now):
     ai = FakeAI()
     service = ConversationService(repo, ai, clock=lambda: now)
 
-    product = await service.handle(IncomingMessage(12, None, "Оливки без косточки"))
+    product = await service.handle(IncomingMessage(12, None, "макароны"))
 
     assert product.text == "Подскажите, пожалуйста, какой объём продукции вам необходим?"
     assert product.text.count("?") == 1
     assert product.delay is False
     saved = await repo.get_client(12)
-    assert saved.product == "Оливки без косточки"
+    assert saved.product == "макароны"
     assert saved.volume is None
     assert saved.status == "уточнение объёма"
     assert ai.calls == []
@@ -163,7 +163,7 @@ async def test_ai_is_allowed_only_after_both_fields_and_sets_delay(now):
             telegram_id=15,
             name="Иван",
             phone="+799****0005",
-            product="аджика",
+            product="макароны",
             status="уточнение объёма",
         )
     )

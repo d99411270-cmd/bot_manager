@@ -27,7 +27,11 @@ START_TEXT = (
     "Подскажите, пожалуйста, как я могу к вам обращаться?"
 )
 FALLBACK = "Я уточню этот вопрос и вернусь к вам."
-CATALOG_NO_MATCH_REPLY = "Подходящих товаров по этому запросу сейчас нет."
+CATALOG_NO_MATCH_REPLY = "Такого товара сейчас нет в каталоге."
+CATALOG_RESULT_EMPTY_PREFIX = (
+    "CATALOG_RESULT_EMPTY: deterministic search found no matching positions. "
+    "Do not invent products, prices, or availability."
+)
 PRODUCT_QUESTION = "Подскажите, какая продукция вас сейчас интересует?"
 PRODUCT_ASSORTMENT = (
     "В Стокозавре представлены основные категории продуктов для оптовых закупок: "
@@ -364,10 +368,19 @@ def _infer_unit_price_request(text: str) -> str | None:
 
 def _is_generic_fallback_reply(reply: str) -> bool:
     normalized = re.sub(r"[^а-яёa-z]+", " ", reply.lower()).strip()
-    return normalized in {
+    if normalized in {
         re.sub(r"[^а-яёa-z]+", " ", FALLBACK.lower()).strip(),
         "актуальную информацию уточню и вернусь к вам",
-    }
+    }:
+        return True
+    return bool(
+        re.search(
+            r"\b(?:сейчас\s+)?(?:уточн\w*|провер\w*|выясн\w*|разбер\w*)\b"
+            r"[^?]{0,100}\b(?:верн\w*|напиш\w*|сообщ\w*|свяж\w*)\b",
+            reply,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _asks_about_delivery(text: str) -> bool:
@@ -377,7 +390,8 @@ def _asks_about_delivery(text: str) -> bool:
 def extract_volume(text: str) -> str | None:
     match = re.search(
         r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
-        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|шт\.?|штук\w*|литр\w*)",
+        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|шт\.?|штук\w*|литр\w*|"
+        r"г(?:р(?:амм\w*)?)?\.?|грамм\w*)",
         text.lower(),
     )
     if not match:
@@ -444,6 +458,8 @@ def is_valid_ai_reply(text: str, catalog_result: str | None = None) -> bool:
 
 def _is_honest_no_match(reply: str) -> bool:
     lowered = reply.lower()
+    if "?" in reply or re.search(r"альтернатив|похож|замен|предлож|друг(?:ой|ие)", lowered):
+        return False
     return bool(re.search(r"нет|не найден|отсутств\w*|подходящ\w* товар\w*", lowered))
 
 
@@ -470,6 +486,102 @@ def _ai_rejection_reason(turn: AiTurn | None, catalog_result: str | None = None)
 
 def _catalog_has_positions(result: str) -> bool:
     return any("SKU:" in line for line in result.splitlines())
+
+
+def _catalog_no_match_context(result: str | None) -> bool:
+    return bool(result and "CATALOG_RESULT_EMPTY" in result and not _catalog_has_positions(result))
+
+
+def _mark_catalog_result_empty(result: str | None) -> str:
+    if _catalog_no_match_context(result):
+        return result or CATALOG_RESULT_EMPTY_PREFIX
+    return CATALOG_RESULT_EMPTY_PREFIX + "\n" + (result or "Каталог пуст.")
+
+
+def _remember_catalog_no_match(client: ClientProfile, query: str | None) -> None:
+    if query:
+        client.catalog_no_match_query = query[:300]
+        if client.product == query:
+            client.product = None
+        if client.current_interest == query:
+            client.current_interest = None
+    client.status = "уточнение продукта"
+    client.needs_human = False
+    client.pending_manager_question = None
+
+
+def _clear_catalog_no_match(client: ClientProfile) -> None:
+    client.catalog_no_match_query = None
+
+
+_NON_PRODUCT_INTAKE_PHRASES = frozenset(
+    {
+        "ага",
+        "благодарю",
+        "благодарю вас",
+        "большое спасибо",
+        "буду ждать",
+        "все понятно",
+        "да",
+        "договорились",
+        "жду",
+        "жду ответа",
+        "ладно",
+        "не знаю",
+        "нет",
+        "ок",
+        "окей",
+        "понял",
+        "понял вас",
+        "поняла",
+        "поняла вас",
+        "понятно",
+        "принял",
+        "приняла",
+        "принято",
+        "продолжим",
+        "спасибо",
+        "спасибо большое",
+        "спасибо понял",
+        "спасибо поняла",
+        "хорошо",
+        "хорошо жду",
+        "ясно",
+        "ясно спасибо",
+    }
+)
+
+
+def _is_non_product_intake_text(text: str) -> bool:
+    normalized = re.sub(r"[^а-яёa-z0-9]+", " ", text.lower()).strip().replace("ё", "е")
+    return normalized in _NON_PRODUCT_INTAKE_PHRASES or any(
+        (
+            looks_like_refusal(text),
+            _is_generic_fallback_reply(text),
+            _is_catalog_or_price_question(text),
+            asks_for_price_list(text),
+            prefers_chat_here(text),
+            asks_about_pending_update(text),
+            is_irritated(text),
+            looks_like_ready_to_buy(text),
+        )
+    )
+
+
+def _intake_exception_product_query(client: ClientProfile, text: str) -> str | None:
+    """Return only a new product statement when intake did not produce JSON."""
+    if (
+        not text.strip()
+        or not has_contact(client)
+        or client.current_interest
+        or client.product
+        or "?" in text
+        or extract_volume(text)
+        or asks_about_manufacturer(text)
+        or _is_non_product_intake_text(text)
+    ):
+        return None
+    return text.strip()
 
 
 def _repair_reply_is_grounded(reply: str, catalog_result: str) -> bool:
@@ -711,7 +823,36 @@ class ConversationService:
                 BotReply(f"Кажется, {wording}. Пришлите, пожалуйста, номер ещё раз."),
                 now,
             )
-        captured = self._apply_intake_facts(client, semantic, message.text)
+        catalog_query = None
+        preliminary_catalog_result = None
+        catalog_no_match = False
+        if semantic and semantic.product and has_contact(client):
+            catalog_query = semantic.product.strip()
+        elif client.catalog_no_match_query:
+            catalog_query = client.catalog_no_match_query
+        elif looks_like_volume(text) and (client.current_interest or client.product):
+            catalog_query = client.current_interest or client.product
+        elif semantic is None:
+            catalog_query = _intake_exception_product_query(client, text)
+        if catalog_query:
+            preliminary_catalog_result = (
+                search(catalog_query, include_competitors=True)
+                if asks_for_competitor(text)
+                else search(catalog_query)
+            )
+            if not _catalog_has_positions(preliminary_catalog_result):
+                preliminary_catalog_result = _mark_catalog_result_empty(preliminary_catalog_result)
+                catalog_no_match = True
+                _remember_catalog_no_match(client, catalog_query)
+            elif client.catalog_no_match_query:
+                _clear_catalog_no_match(client)
+
+        captured = self._apply_intake_facts(
+            client,
+            semantic,
+            message.text,
+            allow_catalog_facts=not catalog_no_match,
+        )
         if semantic and semantic.budget is not None:
             client.budget = semantic.budget
             client.comment = self._with_comment(client.comment, f"Бюджет: {semantic.budget} ₽")
@@ -764,6 +905,8 @@ class ConversationService:
         catalog_result = (
             composite_catalog
             if composite_catalog
+            else preliminary_catalog_result
+            if preliminary_catalog_result is not None
             else (
                 search(
                     client.current_interest or client.product or text,
@@ -826,6 +969,9 @@ class ConversationService:
 
         if composite_catalog:
             return await self._handle_ai(client, message.text, now, composite_catalog)
+
+        if catalog_no_match:
+            return await self._handle_ai(client, message.text, now, catalog_result)
 
         if is_qualified(client):
             client.status = "квалифицирован"
@@ -988,7 +1134,12 @@ class ConversationService:
             return None
 
     def _apply_intake_facts(
-        self, client: ClientProfile, semantic: IntakeAnalysis | None, text: str = ""
+        self,
+        client: ClientProfile,
+        semantic: IntakeAnalysis | None,
+        text: str = "",
+        *,
+        allow_catalog_facts: bool = True,
     ) -> bool:
         captured = False
         parsed = parse_person_name(text)
@@ -1017,7 +1168,7 @@ class ConversationService:
                     client.email = email
                     client.status = "уточнение продукта"
                     captured = True
-            if has_contact(client) and semantic.product:
+            if allow_catalog_facts and has_contact(client) and semantic and semantic.product:
                 if client.product and client.product != semantic.product:
                     client.original_interests = list(client.original_interests or [client.product])
                 client.current_interest = semantic.product[:300]
@@ -1032,7 +1183,7 @@ class ConversationService:
             and looks_like_volume(semantic.volume)
         ):
             volume = semantic.volume.strip()[:300]
-        if volume and client.product:
+        if allow_catalog_facts and volume and client.product:
             client.volume = volume[:300]
             captured = True
             if has_contact(client):
@@ -1175,15 +1326,21 @@ class ConversationService:
         unit_quote: UnitPriceQuote | None = None,
     ) -> BotReply:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
+        catalog_no_match = _catalog_no_match_context(catalog_result)
         turn = await self._safe_respond(client, history, user_message, catalog_result)
-        self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
-        if turn is not None and _ai_rejection_reason(turn, catalog_result) is None:
+        if not catalog_no_match:
+            self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
+        if (
+            turn is not None
+            and _ai_rejection_reason(turn, catalog_result) is None
+            and not catalog_no_match
+        ):
             self._remember_catalog_interest(client, catalog_result, turn.reply)
         rejection_reason = _ai_rejection_reason(turn, catalog_result)
         if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
             rejection_reason = "invalid_reply"
         if rejection_reason is not None:
-            if turn and turn.needs_human and not unit_quote:
+            if turn and turn.needs_human and not unit_quote and not catalog_no_match:
                 client.needs_human = True
             logger.warning(
                 "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
@@ -1201,7 +1358,11 @@ class ConversationService:
                 and _repair_reply_is_grounded(repair.reply, catalog_result or "")
             ):
                 return await self._finish(
-                    client, user_message, BotReply(repair.reply.strip(), delay=False), now
+                    client,
+                    user_message,
+                    BotReply(repair.reply.strip(), delay=False),
+                    now,
+                    add_price_list_offer=not catalog_no_match,
                 )
             if repair is not None:
                 logger.warning(
@@ -1214,9 +1375,23 @@ class ConversationService:
                 client, history, user_message, rejection_reason, catalog_result or ""
             )
             if open_turn and _ai_rejection_reason(open_turn, catalog_result) is None:
-                self._apply_turn_facts(client, open_turn)
+                if not catalog_no_match:
+                    self._apply_turn_facts(client, open_turn)
                 return await self._finish(
-                    client, user_message, BotReply(open_turn.reply.strip(), delay=False), now
+                    client,
+                    user_message,
+                    BotReply(open_turn.reply.strip(), delay=False),
+                    now,
+                    add_price_list_offer=not catalog_no_match,
+                )
+            if catalog_no_match:
+                _remember_catalog_no_match(client, client.catalog_no_match_query)
+                return await self._finish(
+                    client,
+                    user_message,
+                    BotReply(CATALOG_NO_MATCH_REPLY, delay=False),
+                    now,
+                    add_price_list_offer=False,
                 )
             deterministic_recovery = _deterministic_recovery_reply(
                 user_message, catalog_result or ""
@@ -1289,6 +1464,14 @@ class ConversationService:
             client.needs_human = True
             client.pending_manager_question = user_message[:500]
             return await self._finish(client, user_message, BotReply(reply, delay=False), now)
+        if catalog_no_match:
+            return await self._finish(
+                client,
+                user_message,
+                BotReply((turn.reply if turn else CATALOG_NO_MATCH_REPLY).strip(), delay=True),
+                now,
+                add_price_list_offer=False,
+            )
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now
         )

@@ -152,16 +152,16 @@ async def test_product_and_volume_are_accepted_together_only_after_contact(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(ClientProfile(telegram_id=6, name="Иван", phone="+79991234567"))
     ai = SemanticAI(
-        [analysis("provide_data", product="оливки", volume="20 коробок")],
+        [analysis("provide_data", product="макароны", volume="20 коробок")],
         [AiTurn(reply="Спасибо, всё зафиксировал.")],
     )
     service = ConversationService(repo, ai, clock=lambda: now)
 
-    result = await service.handle(IncomingMessage(6, None, "Оливки, 20 коробок"))
+    result = await service.handle(IncomingMessage(6, None, "Макароны, 20 коробок"))
     saved = await repo.get_client(6)
 
     assert (saved.product, saved.volume, saved.status) == (
-        "оливки",
+        "макароны",
         "20 коробок",
         "квалифицирован",
     )

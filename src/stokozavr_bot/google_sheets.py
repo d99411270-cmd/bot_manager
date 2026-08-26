@@ -22,6 +22,7 @@ CLIENT_HEADERS = [
     "комментарии",
 ]
 HISTORY_HEADERS = ["дата", "telegram_id", "сообщение клиента", "ответ Ивана"]
+CATALOG_NO_MATCH_MARKER = "Товар не найден: "
 
 
 class GoogleSheetsCRMRepository:
@@ -137,6 +138,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     volume, email, budget, skipped, last_name, extra = _parse_comment(comment)
     due, sent, extra = _split_followup(extra)
     price_list_requested, price_list_sent_at, extra = _split_price_list_state(extra)
+    catalog_no_match_query, extra = _split_catalog_no_match(extra)
     return ClientProfile(
         telegram_id=telegram_id,
         username=_text(row.get("username")),
@@ -158,6 +160,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         needs_human="Нужен менеджер" in extra,
         price_list_requested=price_list_requested,
         price_list_sent_at=price_list_sent_at,
+        catalog_no_match_query=catalog_no_match_query,
     )
 
 
@@ -226,6 +229,17 @@ def _split_price_list_state(extra: str) -> tuple[bool, datetime | None, str]:
     return requested, sent_at, " | ".join(kept)
 
 
+def _split_catalog_no_match(extra: str) -> tuple[str | None, str]:
+    query = None
+    kept: list[str] = []
+    for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        if part.startswith(CATALOG_NO_MATCH_MARKER):
+            query = part.removeprefix(CATALOG_NO_MATCH_MARKER).strip() or None
+        else:
+            kept.append(part)
+    return query, " | ".join(kept)
+
+
 def _build_comment(client: ClientProfile) -> str:
     parts: list[str] = []
     if client.volume:
@@ -250,8 +264,12 @@ def _build_comment(client: ClientProfile) -> str:
         parts.append(f"Исходный интерес: {', '.join(client.original_interests)}")
     if client.current_interest:
         parts.append(f"Текущий интерес: {client.current_interest}")
+    if client.catalog_no_match_query:
+        query = client.catalog_no_match_query.replace("|", "/")
+        parts.append(f"{CATALOG_NO_MATCH_MARKER}{query}")
     extra = _split_followup(_parse_comment(client.comment or "")[5])[2]
     extra = _split_price_list_state(extra)[2]
+    extra = _split_catalog_no_match(extra)[1]
     if client.last_name:
         parts.append(f"Фамилия: {client.last_name}")
     if client.budget is not None:
