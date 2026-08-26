@@ -53,7 +53,12 @@
 
 ## Проверка
 
-- На 2026-08-26 (main `0d1e773` + живой rerun P1/P3/P6 на isolated Beget, без push/deploy):
+- На 2026-08-26 (production deploy `1b5169e` / `stable-production-1b5169e`):
+- GitHub `main` запушен, пакет переустановлен, `Run polling` для `@Stokozavr_manager_bot`.
+- CRM `679025492`: Клиенты REMAINING 0, История REMAINING 0.
+- MAX и Xray остались `active`. Пуш и деплой выполнены по явному слову.
+
+Ранее на 2026-08-26 (main `0d1e773` + живой rerun P1/P3/P6 на isolated Beget, без push/deploy):
 - `.venv/bin/pytest -q` — `430 passed`.
 - `ruff check .` / `ruff format --check .` / `git diff --check` — чисто.
 - Isolated smoke: `SMOKE=ok model=deepseek-v4-flash` на `/tmp/stokozavr-qa-round2`.
@@ -135,9 +140,9 @@
 
 ## Дальше
 
-Slice G в main (`0d1e773`). Живой rerun P1/P3/P6 на isolated стенде зелёный. На Beget ещё старый Иван. Осталось: явный пуш/деплой, подключение handoff к стенду, живой amoCRM, name-frequency.
+Slice G в main и на Beget (`1b5169e`, tag `stable-production-1b5169e`). Живой rerun P1/P3/P6 зелёный. После деплоя карточка/история `679025492` обнулены (0/0), polling `@Stokozavr_manager_bot` подтверждён. Осталось: живой amoCRM, name-frequency, handoff adapter в стенде.
 
-Локально есть выдуманный тестовый каталог и tool-calling. Реальные коммерческие данные не добавлялись. На Beget ещё старый Иван.
+Локально есть выдуманный тестовый каталог и tool-calling. Реальные коммерческие данные не добавлялись. Production на Beget: `1b5169e`.
 
 - Google Sheets API включён.
 - Таблица `CRM Стокозавр`: `1H-Iwm_CjjpSdDPk-UQJE6uu7PzFZKY-XsVWA0X_buxc`.
