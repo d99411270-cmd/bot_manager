@@ -182,7 +182,7 @@ def test_intervening_non_competitor_reply_clears_last_reply():
 
 
 @pytest.mark.asyncio
-async def test_apple_juice_availability_does_not_count_competitor(now):
+async def test_primary_availability_names_linked_competitor_once(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(_juice_client(2100000101))
     ai = ScriptedCatalogAI(["Да, сок яблочный Северная Капля, 890 ₽ за 6 x 1 л."])
@@ -190,13 +190,108 @@ async def test_apple_juice_availability_does_not_count_competitor(now):
         IncomingMessage(2100000101, None, "яблочный сок есть?")
     )
     saved = await repo.get_client(2100000101)
+    catalog = "\n".join(ai.catalog_calls)
 
     assert "северная капля" in result.text.lower()
     assert "890" in result.text
     assert "6 x 1" in result.text.lower()
+    assert "росинка" in result.text.lower()
+    assert "990" in result.text
+    assert saved.competitor_mentions == 1
+    assert saved.competitor_last_reply is True
+    assert "SOK-APPLE-ALT-001" in catalog
+    assert "росинка" in catalog.lower()
+
+
+@pytest.mark.asyncio
+async def test_thanks_on_known_sku_does_not_name_competitor(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_juice_client(2100000106))
+    ai = ScriptedCatalogAI(["Пожалуйста, Олег. Если нужно — посчитаю объём."])
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(2100000106, None, "спасибо")
+    )
+    saved = await repo.get_client(2100000106)
+
     assert "росинка" not in result.text.lower()
     assert "990" not in result.text
     assert saved.competitor_mentions == 0
+    assert saved.competitor_last_reply is False
+
+
+@pytest.mark.asyncio
+async def test_category_list_does_not_name_or_include_competitors(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_juice_client(2100000107))
+    ai = ScriptedCatalogAI(
+        ["Из напитков: сок Северная Капля 890 ₽, Росинка Поля 990 ₽, лимонад и морс."]
+    )
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(2100000107, None, "какие напитки есть?")
+    )
+    saved = await repo.get_client(2100000107)
+    catalog = "\n".join(ai.catalog_calls)
+
+    assert "росинка" not in result.text.lower()
+    assert "990" not in result.text
+    assert "-ALT-" not in catalog
+    assert saved.competitor_mentions == 0
+
+
+@pytest.mark.asyncio
+async def test_second_unsolicited_primary_quote_keeps_silent(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_juice_client(2100000108))
+    ai = ScriptedCatalogAI(
+        [
+            "Да, сок яблочный Северная Капля, 890 ₽ за 6 x 1 л.",
+            "Фасовка 6 x 1 л, Северная Капля 890 ₽.",
+            "Лимонад цитрусовый Лимонный Берег, 720 ₽ за 6 x 1.5 л.",
+        ]
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+    first = await service.handle(IncomingMessage(2100000108, None, "яблочный сок есть?"))
+    saved = await repo.get_client(2100000108)
+    assert "росинка" in first.text.lower()
+    assert saved.competitor_mentions == 1
+
+    mid = await service.handle(IncomingMessage(2100000108, None, "какая фасовка?"))
+    saved = await repo.get_client(2100000108)
+    assert "росинка" not in mid.text.lower()
+    assert saved.competitor_last_reply is False
+
+    second = await service.handle(IncomingMessage(2100000108, None, "лимонад есть?"))
+    saved = await repo.get_client(2100000108)
+    assert "солнечный" not in second.text.lower()
+    assert "810" not in second.text
+    assert saved.competitor_mentions == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_can_be_second_mention_after_unsolicited_quote(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_juice_client(2100000109))
+    pair = "Северная Капля 890 ₽ за 6 x 1 л, Росинка Поля 990 ₽ за 6 x 1 л."
+    ai = ScriptedCatalogAI(
+        [
+            "Да, сок яблочный Северная Капля, 890 ₽ за 6 x 1 л.",
+            "Фасовка 6 x 1 л, Северная Капля 890 ₽.",
+            pair,
+        ]
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(2100000109, None, "яблочный сок есть?"))
+    saved = await repo.get_client(2100000109)
+    assert "росинка" in first.text.lower()
+    assert saved.competitor_mentions == 1
+
+    await service.handle(IncomingMessage(2100000109, None, "какая фасовка?"))
+    second = await service.handle(IncomingMessage(2100000109, None, "сравните"))
+    saved = await repo.get_client(2100000109)
+    assert "990" in second.text
+    assert "росинка" in second.text.lower()
+    assert saved.competitor_mentions == 2
 
 
 @pytest.mark.asyncio

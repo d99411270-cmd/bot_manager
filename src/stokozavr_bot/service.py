@@ -276,6 +276,121 @@ def asks_for_competitor(text: str) -> bool:
     return bool(re.search(r"подешев\w*|есть вариант\w*|сравн\w*|альтернатив\w*", text.lower()))
 
 
+def _search_catalog_for_turn(query: str, text: str, client: ClientProfile) -> str:
+    if asks_for_competitor(text):
+        return search(query, include_competitors=True)
+    result = search(query)
+    if client.competitor_mentions == 0 and not client.competitor_last_reply:
+        return _with_linked_competitor(result)
+    return result
+
+
+def _catalog_skus(catalog_result: str | None) -> set[str]:
+    return {
+        sku.upper()
+        for sku in re.findall(r"SKU:\s*([A-Z0-9-]+)", catalog_result or "", re.IGNORECASE)
+    }
+
+
+def _primary_records_in_result(catalog_result: str | None):
+    skus = _catalog_skus(catalog_result)
+    return [
+        record
+        for record in _all_records()
+        if not record.is_competitor and record.sku.upper() in skus
+    ]
+
+
+def _linked_more_expensive_competitor(primary):
+    primary_amount = _price_token(primary.price)
+    if not primary_amount or not primary_amount.isdigit():
+        return None
+    matches = [
+        record
+        for record in _all_records()
+        if record.is_competitor
+        and record.for_sku == primary.sku
+        and (token := _price_token(record.price))
+        and token.isdigit()
+        and int(token) > int(primary_amount)
+    ]
+    return matches[0] if matches else None
+
+
+def _format_catalog_record_line(record) -> str:
+    return (
+        f"Категория: {record.category}; Подкатегория: {record.subcategory}; "
+        f"SKU: {record.sku}; Производитель: {record.manufacturer}; "
+        f"Фасовка: {record.packaging}; Цена: {record.price}; "
+        f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}"
+    )
+
+
+def _with_linked_competitor(result: str) -> str:
+    primaries = _primary_records_in_result(result)
+    if len(primaries) != 1:
+        return result
+    competitor = _linked_more_expensive_competitor(primaries[0])
+    if competitor is None or competitor.sku.upper() in _catalog_skus(result):
+        return result
+    return f"{result.rstrip()}\n{_format_catalog_record_line(competitor)}"
+
+
+def _is_primary_position_quote(text: str) -> bool:
+    """True for a specific SKU ask (есть? / почём / наличие), not thanks or budget."""
+    if _is_broad_assortment_utterance(text) or asks_for_price_list(text):
+        return False
+    normalized = re.sub(r"[^а-яёa-z0-9]+", " ", (text or "").lower()).strip().replace("ё", "е")
+    if normalized in _NON_PRODUCT_INTAKE_PHRASES:
+        return False
+    lowered = (text or "").lower()
+    asks_presence = bool(re.search(r"\bесть\b|\bналич", lowered))
+    asks_price = bool(re.search(r"поч[её]м|сколько стоит|\bцен\w*|\bстоимост", lowered))
+    if _utterance_search_key(text) and (asks_presence or asks_price):
+        return True
+    return bool(_is_anaphoric_followup(text) and (asks_presence or asks_price))
+
+
+def ensure_unsolicited_linked_competitor(
+    client: ClientProfile,
+    user_message: str,
+    text: str,
+    catalog_result: str | None,
+) -> str:
+    """Name the dearer linked competitor once on a specific primary quote."""
+    if asks_for_competitor(user_message) or asks_for_price_list(user_message):
+        return text
+    if not _is_primary_position_quote(user_message):
+        return text
+    if client.competitor_mentions != 0 or client.competitor_last_reply:
+        return text
+    if _reply_shows_competitor(text) or not catalog_result:
+        return text
+    primaries = _primary_records_in_result(catalog_result)
+    if len(primaries) != 1:
+        return text
+    competitor = _linked_more_expensive_competitor(primaries[0])
+    if competitor is None:
+        return text
+    return f"{text.rstrip()} Для сравнения {competitor.manufacturer} — {competitor.price}."
+
+
+def _allow_unsolicited_or_requested_competitor(
+    client: ClientProfile,
+    user_message: str,
+    text: str,
+    catalog_result: str | None,
+) -> bool:
+    if asks_for_competitor(user_message):
+        return True
+    if client.competitor_mentions != 0 or not _reply_shows_competitor(text):
+        return False
+    return (
+        _is_primary_position_quote(user_message)
+        and len(_primary_records_in_result(catalog_result)) == 1
+    )
+
+
 def asks_for_price_list(text: str) -> bool:
     if cancels_price_list(text):
         return False
@@ -1226,6 +1341,7 @@ class ConversationService:
         self.clock = clock
         self.followup_delay = followup_delay
         self.handoff = handoff
+        self._turn_catalog_result: str | None = None
 
     @staticmethod
     def should_use_ai(client: ClientProfile | None, text: str) -> bool:
@@ -1252,6 +1368,7 @@ class ConversationService:
 
     async def handle(self, message: IncomingMessage) -> BotReply:
         now = self.clock()
+        self._turn_catalog_result = None
         client = await self.repository.get_client(message.telegram_id)
         if client is None:
             client = ClientProfile(
@@ -1440,11 +1557,7 @@ class ConversationService:
         preliminary_catalog_result = None
         catalog_no_match = False
         if catalog_query is not None:
-            preliminary_catalog_result = (
-                search(catalog_query, include_competitors=True)
-                if asks_for_competitor(text)
-                else search(catalog_query)
-            )
+            preliminary_catalog_result = _search_catalog_for_turn(catalog_query, text, client)
             if not _catalog_has_positions(preliminary_catalog_result):
                 if query_owner in {"utterance", "semantic", "sticky"}:
                     preliminary_catalog_result = _mark_catalog_result_empty(
@@ -1513,7 +1626,6 @@ class ConversationService:
         composite_catalog = (
             calculated_composite[0] if calculated_composite else _composite_order_catalog(text)
         )
-        competitor_request = asks_for_competitor(text)
         if catalog_query is not None:
             search_key = catalog_query
         else:
@@ -1530,11 +1642,7 @@ class ConversationService:
             if composite_catalog
             else preliminary_catalog_result
             if preliminary_catalog_result is not None
-            else (
-                search(search_key, include_competitors=True)
-                if competitor_request
-                else search(search_key)
-            )
+            else _search_catalog_for_turn(search_key, text, client)
             if search_key is not None
             else None
         )
@@ -1598,6 +1706,7 @@ class ConversationService:
                 "Check the customer's meaning against the available categories; do not invent "
                 "products, prices, or availability.\n" + (catalog_result or "")
             )
+        self._turn_catalog_result = catalog_result
 
         if composite_catalog:
             return await self._handle_ai(
@@ -2367,8 +2476,15 @@ class ConversationService:
         now: datetime,
     ) -> BotReply:
         apply_followup_rules(client, user_message, reply.text, now, self.followup_delay)
+        text = ensure_unsolicited_linked_competitor(
+            client, user_message, reply.text, self._turn_catalog_result
+        )
         safe_text = limit_competitor_mentions(
-            client, reply.text, allowed=asks_for_competitor(user_message)
+            client,
+            text,
+            allowed=_allow_unsolicited_or_requested_competitor(
+                client, user_message, text, self._turn_catalog_result
+            ),
         )
         reply = BotReply(
             safe_text,
