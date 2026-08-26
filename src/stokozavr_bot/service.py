@@ -12,6 +12,7 @@ from .catalog_quotes import (
     _product_terms,
     parse_requested_quantity,
 )
+from .catalog_tokens import expand_query_terms, term_matches_haystack
 from .closing import (
     CHANNEL_CALL,
     CHANNEL_PICKUP,
@@ -25,6 +26,7 @@ from .closing import (
     looks_like_call_time,
     looks_like_pickup_choice,
     looks_like_pickup_question,
+    looks_like_pickup_rejection,
     looks_like_ready_to_buy,
     parse_time_slot,
     pickup_choice_reply,
@@ -144,6 +146,12 @@ def looks_like_refusal(text: str) -> bool:
 
 def has_contact(client: ClientProfile) -> bool:
     return bool(client.phone or client.email or client.contact_skipped)
+
+
+def _has_known_order(client: ClientProfile) -> bool:
+    return bool(
+        client.product or client.current_interest or client.original_interests or client.volume
+    )
 
 
 def requested_identity_slot(client: ClientProfile) -> str | None:
@@ -459,7 +467,7 @@ def _asks_about_delivery(text: str) -> bool:
 def extract_volume(text: str) -> str | None:
     match = re.search(
         r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
-        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|шт\.?|штук\w*|литр\w*|"
+        r"ящик\w*|бан\w*|паллет\w*|упаков\w*|сет(?:ок|к\w*)|шт\.?|штук\w*|литр\w*|"
         r"г(?:р(?:амм\w*)?)?\.?|грамм\w*)",
         text.lower(),
     )
@@ -814,18 +822,19 @@ def _intake_exception_product_query(client: ClientProfile, text: str) -> str | N
 
 def _utterance_names_catalog_topic(text: str, result: str) -> bool:
     """True when the phrase names a category or item, not a packaging/price fragment."""
-    lowered = text.lower()
+    terms = expand_query_terms(text)
+    if not terms:
+        return False
     for line in result.splitlines():
         if "SKU:" not in line:
             continue
         category = re.search(r"Категория:\s*([^;]+)", line)
         subcategory = re.search(r"Подкатегория:\s*([^;]+)", line)
-        for value in (
-            category.group(1) if category else "",
-            subcategory.group(1) if subcategory else "",
-        ):
-            if any(token in lowered for token in re.findall(r"[а-яёa-z0-9-]{3,}", value.lower())):
-                return True
+        hay = (
+            f"{category.group(1) if category else ''} {subcategory.group(1) if subcategory else ''}"
+        )
+        if any(term_matches_haystack(term, hay) for term in terms):
+            return True
     return False
 
 
@@ -1211,9 +1220,19 @@ class ConversationService:
                 client.phone_correction_pending = False
                 client.phone = deterministic_phone
                 client.contact_skipped = False
-                if client.status == "готов к заказу":
+                if client.status == "готов к заказу" or _has_known_order(client):
+                    client.status = "готов к заказу"
                     if not client.fulfillment_channel:
                         client.fulfillment_channel = CHANNEL_CALL
+                    if client.requested_slot:
+                        handoff_id = await self._create_handoff("call", client)
+                        client.handoff_id = handoff_id
+                        return await self._finish(
+                            client,
+                            message.text,
+                            BotReply(call_slot_reply(client.requested_slot, handoff_id=handoff_id)),
+                            now,
+                        )
                     return await self._finish(client, message.text, BotReply(CLOSE_ASK_TIME), now)
                 client.status = "уточнение продукта"
                 return await self._finish(
@@ -1721,22 +1740,21 @@ class ConversationService:
             and can_read_semantic
             and semantic.volume
             and looks_like_volume(semantic.volume)
+            and _may_write_commercial_facts(client)
         ):
             volume = semantic.volume.strip()[:300]
         if _looks_like_packaging_fragment(text) or (
             volume is not None and _looks_like_packaging_fragment(volume)
         ):
             volume = None
-        if (
-            allow_catalog_facts
-            and volume
-            and not client.volume
-            and client.product
-            and _may_write_commercial_facts(client)
-        ):
+        if allow_catalog_facts and volume and not client.volume:
             client.volume = volume[:300]
             captured = True
-            if has_contact(client):
+            if (
+                has_contact(client)
+                and requested_identity_slot(client) is None
+                and client.status not in {"готов к заказу", "получил предложение"}
+            ):
                 client.status = "квалифицирован"
         return captured
 
@@ -1870,8 +1888,14 @@ class ConversationService:
             client.fulfillment_channel = CHANNEL_PICKUP
             client.status = "готов к заказу"
             return await self._finish(client, user_message, BotReply(pickup_choice_reply()), now)
-        if client.fulfillment_channel == CHANNEL_PICKUP and looks_like_call_request(text):
+        if (
+            client.fulfillment_channel == CHANNEL_PICKUP
+            and looks_like_call_request(text)
+            and not looks_like_pickup_rejection(text)
+        ):
             return await self._finish(client, user_message, BotReply(channel_clarify_reply()), now)
+        if looks_like_call_request(text) or looks_like_pickup_rejection(text):
+            client.fulfillment_channel = CHANNEL_CALL
         slot = parse_time_slot(text)
         if client.fulfillment_channel == CHANNEL_PICKUP:
             if slot:

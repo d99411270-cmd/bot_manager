@@ -297,7 +297,7 @@ async def test_ai_cannot_skip_phone_or_change_fsm(now):
 
     assert saved.phone is None
     assert saved.product is None
-    assert saved.volume is None
+    assert saved.volume == "999 коробок"
     assert saved.status == "ожидает телефон"
     assert "номер телефона" in result.text.lower()
 

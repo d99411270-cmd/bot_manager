@@ -2,7 +2,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from stokozavr_bot.closing import CLOSE_ASK_TIME, CLOSE_NEED_PHONE, looks_like_ready_to_buy
+from stokozavr_bot.closing import (
+    CLOSE_ASK_TIME,
+    CLOSE_NEED_PHONE,
+    looks_like_call_request,
+    looks_like_pickup_choice,
+    looks_like_ready_to_buy,
+)
 from stokozavr_bot.handoff import InMemoryManagerHandoff
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.prompt_bundle import load_prompt_bundle
@@ -78,6 +84,18 @@ def test_ready_phrases():
     assert not looks_like_ready_to_buy("сколько огурцы")
 
 
+def test_call_request_includes_noun_and_rejects_negated_pickup():
+    assert looks_like_call_request("тогда звоните, самовывоз не надо")
+    assert looks_like_call_request("нужен звонок менеджера")
+    assert looks_like_call_request("звонок")
+    assert looks_like_call_request("перезвоните завтра после 16:00")
+    assert not looks_like_pickup_choice("тогда звоните, самовывоз не надо")
+    assert not looks_like_pickup_choice("нет, самовывоз не нужен, звоните мне")
+    assert not looks_like_pickup_choice("я на склад не приеду. нужен звонок менеджера, не визит")
+    assert looks_like_pickup_choice("самовывоз")
+    assert looks_like_pickup_choice("заберу сам")
+
+
 def test_quote_and_ready_stages():
     quoted = ClientProfile(1, status="получил предложение", product="огурцы", volume="20 кг")
     ready = ClientProfile(1, status="готов к заказу", product="огурцы", volume="20 кг")
@@ -139,6 +157,33 @@ async def test_ready_with_phone_asks_call_time(now):
     assert result.text == CLOSE_ASK_TIME
     assert "удобн" in result.text.lower()
     assert saved.fulfillment_channel == "call"
+
+
+@pytest.mark.asyncio
+async def test_mobile_after_known_order_asks_time_not_product(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=29,
+            name="Игорь",
+            original_interests=["картофель продовольственный", "рожки классические"],
+            current_interest="сок яблочный",
+            status="ожидает телефон",
+        )
+    )
+    service = _service(repo, now)
+
+    result = await service.handle(IncomingMessage(29, None, "89271000006"))
+    saved = await repo.get_client(29)
+
+    assert saved.phone is not None
+    assert saved.phone.startswith("+7")
+    assert PRODUCT_QUESTION not in result.text
+    assert EMAIL_QUESTION not in result.text
+    assert "какая продукция" not in result.text.lower()
+    assert result.text == CLOSE_ASK_TIME
+    assert saved.fulfillment_channel == "call"
+    assert saved.status == "готов к заказу"
 
 
 @pytest.mark.asyncio
@@ -296,6 +341,49 @@ async def test_without_handoff_adapter_time_is_undetermined_not_catalog_fallback
     assert PRODUCT_QUESTION not in result.text
     assert EMAIL_QUESTION not in result.text
     assert saved.pending_manager_question is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_call_with_rejected_pickup_sets_call_not_visit(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_quoted(27, phone=None, status="получил предложение"))
+    service = _service(repo, now)
+
+    first = await service.handle(IncomingMessage(27, None, "тогда звоните, самовывоз не надо"))
+    second = await service.handle(IncomingMessage(27, None, "я на склад не приеду. нужен звонок"))
+    saved = await repo.get_client(27)
+
+    assert saved.fulfillment_channel == "call"
+    assert "аустрина" not in first.text.lower()
+    assert "жду вас" not in first.text.lower()
+    assert "жду вас" not in second.text.lower()
+    assert "телефон" in first.text.lower() or "номер" in first.text.lower()
+    assert first.text.count("?") <= 1
+    assert second.text.count("?") <= 1
+    assert PRODUCT_QUESTION not in first.text
+    assert PRODUCT_QUESTION not in second.text
+
+
+@pytest.mark.asyncio
+async def test_call_channel_does_not_flip_back_to_pickup_on_not_coming(now):
+    repo = InMemoryCRMRepository()
+    profile = _quoted(28, phone="+799****1122", status="готов к заказу")
+    profile.fulfillment_channel = "call"
+    await repo.save_client(profile)
+    service = _service(repo, now)
+
+    result = await service.handle(
+        IncomingMessage(28, None, "не приеду. не самовывоз. перезвоните мне завтра после 16:00")
+    )
+    saved = await repo.get_client(28)
+
+    assert saved.fulfillment_channel == "call"
+    assert saved.requested_slot == "16:00"
+    assert "16:00" in result.text
+    assert "жду вас" not in result.text.lower()
+    assert "аустрина" not in result.text.lower()
+    assert PRODUCT_QUESTION not in result.text
+    assert result.text.count("?") <= 1
 
 
 @pytest.mark.asyncio

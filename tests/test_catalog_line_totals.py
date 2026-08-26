@@ -253,6 +253,29 @@ def test_quantity_parser_is_general_not_phrase_specific():
     assert nets is not None and nets.amount == 4 and nets.unit == "сетка"
 
 
+def test_quantity_parser_reads_word_number_plus_container():
+    two_boxes = parse_requested_quantity("два короба сколько?")
+    two_packs = parse_requested_quantity("две упаковки")
+    two_nets = parse_requested_quantity("две сетки")
+    digit_boxes = parse_requested_quantity("2 короба")
+
+    assert two_boxes is not None and two_boxes.amount == 2 and two_boxes.unit == "короб"
+    assert two_packs is not None and two_packs.amount == 2 and two_packs.unit == "упаковка"
+    assert two_nets is not None and two_nets.amount == 2 and two_nets.unit == "сетка"
+    assert digit_boxes is not None and digit_boxes.amount == 2 and digit_boxes.unit == "короб"
+
+
+def test_quantity_parser_prefers_asked_pack_count_over_quoted_packaging_size():
+    asked = parse_requested_quantity(
+        "вы же сами сказали короб 10 кг 820 рублей. два короба сколько?"
+    )
+
+    assert asked is not None
+    assert asked.amount == 2
+    assert asked.unit == "короб"
+    assert asked.raw.lower().startswith("два") or "2" in asked.raw
+
+
 def test_line_total_catalog_result_exposes_confirmed_amounts_for_future_safety():
     from stokozavr_bot.product_catalog import line_total_catalog_result
 

@@ -271,6 +271,26 @@ async def test_intake_json_error_still_quotes_known_catalog_apples(now):
 
 
 @pytest.mark.asyncio
+async def test_two_boxes_question_quotes_pack_count_not_packaging_size(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_qualified_apples())
+    ai = FailingCatalogAI()
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(
+            2100000001,
+            None,
+            "вы же сами сказали короб 10 кг 820 рублей. два короба сколько?",
+        )
+    )
+    saved = await repo.get_client(2100000001)
+
+    _assert_not_generic(result.text)
+    assert "1640" in result.text
+    assert "1 короб" not in result.text.lower()
+    assert saved.volume == "20 кг"
+
+
+@pytest.mark.asyncio
 async def test_none_ai_turn_still_quotes_live_catalog_hit(now):
     class DeadAI(FailingCatalogAI):
         async def respond_with_catalog(self, profile, history, message, catalog_result):

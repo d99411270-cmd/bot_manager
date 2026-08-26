@@ -69,6 +69,24 @@ _QUANTITY_UNIT = (
     r"кг|килограмм\w*|л|литр\w*|шт|штук\w*|упаков\w*|уп\b|"
     r"короб\w*|сет(?:ок|к\w*)|мешк\w*|банка|банки|банок|бутылк\w*"
 )
+_WORD_NUMBERS = {
+    "один": 1,
+    "одна": 1,
+    "одно": 1,
+    "два": 2,
+    "две": 2,
+    "двое": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+}
+_WORD_NUMBER_RE = "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True))
+_PACKAGING_CONTAINER_RE = re.compile(r"(?:короб(?:ка)?|сетка|мешок|упаковка|ящик|канистра)\s+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,14 +135,20 @@ def parse_requested_quantity(text: str) -> RequestedQuantity | None:
 
 def parse_requested_quantities(text: str) -> list[tuple[int, int, RequestedQuantity]]:
     found: list[tuple[int, int, RequestedQuantity]] = []
-    lowered = (text or "").lower()
-    for match in re.finditer(rf"(\d+(?:[.,]\d+)?)\s*({_QUANTITY_UNIT})", lowered):
+    lowered = (text or "").lower().replace("ё", "е")
+    pattern = rf"(?:(\d+(?:[.,]\d+)?)|(?<![а-яa-z])({_WORD_NUMBER_RE}))\s*({_QUANTITY_UNIT})"
+    for match in re.finditer(pattern, lowered):
         if re.search(r"₽|руб", lowered[match.end() : match.end() + 4]):
             continue
-        unit = _normalize_unit(match.group(2))
+        unit = _normalize_unit(match.group(3))
         if unit is None:
             continue
-        amount = _decimal(match.group(1))
+        if match.group(1) is not None:
+            amount = _decimal(match.group(1))
+            if _PACKAGING_CONTAINER_RE.search(lowered[: match.start()]) and unit not in _PACK_UNITS:
+                continue
+        else:
+            amount = Decimal(_WORD_NUMBERS[match.group(2)])
         if amount <= 0:
             continue
         found.append(

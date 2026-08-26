@@ -49,19 +49,37 @@ def looks_like_pickup_question(text: str) -> bool:
     lowered = text.strip().lower()
     if "самовывоз" not in lowered:
         return False
+    if looks_like_pickup_rejection(text):
+        return False
     return bool(re.search(r"\?|\bесть\b|\bможно\b", lowered))
+
+
+def looks_like_pickup_rejection(text: str) -> bool:
+    lowered = text.strip().lower().replace("ё", "е")
+    return bool(
+        re.search(
+            r"самовывоз\s+не\s+(?:надо|нужен|нужно|хочу)|"
+            r"не\s+(?:надо|нужен|нужно)\s+самовывоз|"
+            r"без\s+самовывоз|"
+            r"не\s+самовывоз|"
+            r"не\s+приеду|"
+            r"на\s+склад\s+не|"
+            r"не\s+визит",
+            lowered,
+        )
+    )
 
 
 def looks_like_pickup_choice(text: str) -> bool:
     lowered = text.strip().lower()
-    if looks_like_pickup_question(text):
+    if looks_like_pickup_question(text) or looks_like_pickup_rejection(text):
         return False
     return bool(re.search(r"самовывоз|заберу сам|сам заберу|приеду сам", lowered))
 
 
 def looks_like_call_request(text: str) -> bool:
     lowered = text.strip().lower()
-    return bool(re.search(r"\b(?:звоните|позвоните|перезвоните|созвон(?:имся)?)\b", lowered))
+    return bool(re.search(r"\b(?:звоните|позвоните|перезвоните|созвон(?:имся)?|звонок)\b", lowered))
 
 
 def parse_time_slot(text: str) -> str | None:

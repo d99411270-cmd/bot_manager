@@ -466,6 +466,65 @@ async def test_switch_keeps_original_without_fake_ai_product_field(now):
     assert "SOK-APPLE-001" in ai.catalog_calls[0]
 
 
+def test_resolve_catalog_query_uses_current_alias_not_stale_interest():
+    from stokozavr_bot.service import resolve_catalog_query
+
+    client = ClientProfile(
+        telegram_id=914,
+        name="Настя",
+        current_interest="масло",
+        status="получил предложение",
+        contact_skipped=True,
+    )
+    query, owner = resolve_catalog_query(
+        "консервы какие?",
+        IntakeAnalysis(intent="question"),
+        client,
+    )
+
+    assert query is not None
+    assert owner == "utterance"
+    assert "консерв" in query.lower()
+    assert "масло" not in query.lower()
+
+
+@pytest.mark.asyncio
+async def test_canned_food_alias_searches_current_phrase_not_stale_oil(now):
+    class CatalogAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="В консервации есть горошек.")])
+            self.catalog_calls = []
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=914,
+            name="Настя",
+            current_interest="масло",
+            original_interests=["фрукты", "овощи"],
+            status="получил предложение",
+            contact_skipped=True,
+        )
+    )
+    ai = CatalogAI()
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(914, None, "консервы какие?")
+    )
+    saved = await repo.get_client(914)
+
+    assert ai.catalog_calls
+    catalog = ai.catalog_calls[0]
+    assert "CAN-PEAS-001" in catalog
+    assert "CAN-CORN-001" in catalog
+    assert "нет консервов" not in result.text.lower()
+    assert saved.current_interest
+    assert "масло" not in saved.current_interest.lower()
+
+
 def test_catalog_requires_structured_verified_record_before_commercial_facts():
     records = parse_catalog_records(
         """

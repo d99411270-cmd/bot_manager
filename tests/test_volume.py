@@ -6,6 +6,7 @@ from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeA
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import (
     FALLBACK,
+    PRODUCT_QUESTION,
     VOLUME_QUESTION,
     ConversationService,
     extract_volume,
@@ -34,7 +35,8 @@ def now():
 
 
 @pytest.mark.parametrize(
-    "raw", ["200 кг", "200кг", "200 кг.", "36 банок", "20 упаковок", "полпаллеты", "50 литров"]
+    "raw",
+    ["200 кг", "200кг", "200 кг.", "36 банок", "20 упаковок", "полпаллеты", "50 литров", "4 сетки"],
 )
 def test_extract_volume_from_short_replies(raw):
     assert extract_volume(raw)
@@ -315,6 +317,26 @@ async def test_explicit_order_quantity_still_persists_as_first_volume(now, raw):
     saved = await repo.get_client(15)
 
     assert saved.volume == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["4 сетки", "10 упаковок", "36 банок", "20 кг"])
+async def test_explicit_volume_persists_without_contact_or_product(now, raw):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=16, name="Игорь", status="ожидает телефон"))
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data", volume=raw)],
+        [AiTurn(reply="Зафиксировал объём.", volume=raw)],
+    )
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(16, None, raw)
+    )
+    saved = await repo.get_client(16)
+
+    assert saved.volume == raw
+    assert saved.phone is None
+    assert saved.status == "ожидает телефон"
+    assert PRODUCT_QUESTION not in result.text
 
 
 @pytest.mark.asyncio
