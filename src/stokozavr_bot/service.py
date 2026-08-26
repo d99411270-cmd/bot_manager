@@ -10,10 +10,7 @@ from .closing import PENZA_PROMO_AMOUNTS, closing_reply, looks_like_ready_to_buy
 from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
-    budget_quote,
-    grounded_quote_reply,
     grounded_search_reply,
-    listed_price_amounts,
     search,
 )
 from .repositories import CRMRepository
@@ -172,10 +169,10 @@ def _is_catalog_or_price_question(text: str) -> bool:
     )
 
 
-def is_unsafe_claim(text: str) -> bool:
-    """Reject invented prices and exact leftover counts. Allow много/мало/нет."""
+def is_unsafe_claim(text: str, catalog_result: str | None = None) -> bool:
+    """Reject concrete claims not supported by the catalog for this turn."""
     lowered = text.lower()
-    if re.search(r"точно есть|всегда в наличии|име(?:ется|ются)", lowered):
+    if re.search(r"точно есть|всегда в наличии", lowered):
         return True
     if re.search(r"остат\w*\s*:?\s*\d+", lowered):
         return True
@@ -185,22 +182,43 @@ def is_unsafe_claim(text: str) -> bool:
     ):
         return True
     stock_terms = re.search(
-        r"(?:\bв наличии\b|\bна складе\b|\bмного\b|\bмало\b|\bнет в наличии\b)",
+        r"(?:\bв наличии\b|\bна складе\b|\bмного\b|\bмало\b|\bнет в наличии\b|\bиме(?:ется|ются)\b)",
         lowered,
     )
-    # AI replies carry no record provenance. Stock claims are therefore accepted
-    # only through the catalog-grounded fallback/tool result, never from free text.
-    if stock_terms:
+    if stock_terms and not _catalog_supports_claim(lowered, catalog_result):
         return True
     if not re.search(r"(?:\bцен\w*|\bстоимост\w*|₽|\bруб\w*)", lowered):
         return False
     claimed = [
         re.sub(r"\s+", "", match) for match in re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", lowered)
     ]
-    allowed = listed_price_amounts() | PENZA_PROMO_AMOUNTS
     if not claimed:
-        return True
+        return bool(re.search(r"(?:₽|\bруб\w*\b)", lowered))
+    allowed = {
+        re.sub(r"\s+", "", value)
+        for value in re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", catalog_result or "", re.IGNORECASE)
+    } | {str(value) for value in PENZA_PROMO_AMOUNTS}
     return any(amount not in allowed for amount in claimed)
+
+
+def _catalog_supports_claim(reply: str, catalog_result: str | None) -> bool:
+    if not catalog_result or not _catalog_has_positions(catalog_result):
+        return False
+    statuses = {
+        status.lower()
+        for status in re.findall(r"Статус наличия:\s*([^;\n]+)", catalog_result, re.IGNORECASE)
+    }
+    has_status = bool(statuses) and (
+        any(status in reply for status in statuses if status)
+        or bool(re.search(r"\bв наличии\b|\bна складе\b", reply))
+    )
+    has_product = any(
+        word.lower() in reply
+        for word in re.findall(r"[а-яёa-z0-9-]{4,}", catalog_result)
+        if word.lower()
+        not in {"категория", "подкатегория", "производитель", "фасовка", "статус", "наличия"}
+    )
+    return has_status and has_product
 
 
 def looks_like_volume(text: str) -> bool:
@@ -216,11 +234,6 @@ def extract_volume(text: str) -> str | None:
     if not match:
         return None
     return text[match.start() : match.end()].strip()
-
-
-def extract_budget(text: str) -> int | None:
-    match = re.search(r"(?:на|бюджет(?:ом)?|до)\s*(\d[\d\s]{2,})\s*(?:₽|руб\w*)", text.lower())
-    return int(re.sub(r"\s+", "", match.group(1))) if match else None
 
 
 _NAME_STOP = {
@@ -271,19 +284,23 @@ def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
     return first, last
 
 
-def is_valid_ai_reply(text: str) -> bool:
+def is_valid_ai_reply(text: str, catalog_result: str | None = None) -> bool:
     stripped = text.strip()
-    return bool(stripped) and stripped.count("?") <= 1 and not is_unsafe_claim(stripped)
+    return (
+        bool(stripped)
+        and stripped.count("?") <= 1
+        and not is_unsafe_claim(stripped, catalog_result)
+    )
 
 
-def _ai_rejection_reason(turn: AiTurn | None) -> str | None:
+def _ai_rejection_reason(turn: AiTurn | None, catalog_result: str | None = None) -> str | None:
     if turn is None:
         return "exception"
     if turn.needs_human:
         return "needs_human"
-    if not turn.reply or is_unsafe_claim(turn.reply):
-        return "unsafe_reply" if is_unsafe_claim(turn.reply) else "invalid_reply"
-    if not is_valid_ai_reply(turn.reply):
+    if not turn.reply or is_unsafe_claim(turn.reply, catalog_result):
+        return "unsafe_reply" if is_unsafe_claim(turn.reply, catalog_result) else "invalid_reply"
+    if not is_valid_ai_reply(turn.reply, catalog_result):
         return "invalid_reply"
     return None
 
@@ -412,10 +429,9 @@ class ConversationService:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         semantic = await self._safe_analyze(client, history, message.text)
         captured = self._apply_intake_facts(client, semantic, message.text)
-        budget = extract_budget(text)
-        if budget is not None:
-            client.budget = budget
-            client.comment = self._with_comment(client.comment, f"Бюджет: {budget} ₽")
+        if semantic and semantic.budget is not None:
+            client.budget = semantic.budget
+            client.comment = self._with_comment(client.comment, f"Бюджет: {semantic.budget} ₽")
             captured = True
 
         if is_irritated(text):
@@ -449,29 +465,13 @@ class ConversationService:
         if looks_like_ready_to_buy(text) and client.name:
             return await self._handle_closing(client, history, message.text, now)
 
-        budget_question = budget is not None and bool(client.product)
         catalog_result = (
-            search(f"{client.product} {text}")
-            if budget_question
+            search(client.product or text)
+            if client.product
             else search(text)
             if _is_catalog_or_price_question(text)
             else None
         )
-        if budget_question and catalog_result and _catalog_has_positions(catalog_result):
-            quote = budget_quote(client.product or "", budget or 0)
-            if quote:
-                quantity, remainder, price = quote
-                formatted_budget = f"{budget:,}".replace(",", " ")
-                formatted_remainder = f"{remainder:,}".replace(",", " ")
-                return await self._finish(
-                    client,
-                    message.text,
-                    BotReply(
-                        f"При бюджете {formatted_budget} ₽ получится взять {quantity} упаковок "
-                        f"по {price}; останется {formatted_remainder} ₽. Подойдёт такой расчёт?"
-                    ),
-                    now,
-                )
 
         if is_qualified(client):
             client.status = "квалифицирован"
@@ -500,7 +500,7 @@ class ConversationService:
             )
 
         turn = await self._safe_respond(client, history, message.text, catalog_result)
-        rejection_reason = _ai_rejection_reason(turn)
+        rejection_reason = _ai_rejection_reason(turn, catalog_result)
         if rejection_reason is None and turn is not None:
             return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
         logger.warning(
@@ -512,7 +512,7 @@ class ConversationService:
         repair = await self._safe_repair(
             client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
         )
-        repair_reason = _ai_rejection_reason(repair)
+        repair_reason = _ai_rejection_reason(repair, catalog_result)
         if (
             repair_reason is None
             and repair is not None
@@ -527,8 +527,14 @@ class ConversationService:
                 repair.needs_human,
             )
 
-        catalog_reply = grounded_search_reply(
-            catalog_result or "", client.name, history[-1].assistant_message if history else None
+        catalog_reply = (
+            None
+            if asks_for_unverified_info(text) and not client.volume
+            else grounded_search_reply(
+                catalog_result or "",
+                client.name,
+                history[-1].assistant_message if history else None,
+            )
         )
         if catalog_reply:
             return await self._finish(
@@ -772,7 +778,7 @@ class ConversationService:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
         turn = await self._safe_respond(client, history, user_message, catalog_result)
         self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
-        rejection_reason = _ai_rejection_reason(turn)
+        rejection_reason = _ai_rejection_reason(turn, catalog_result)
         if rejection_reason is not None:
             if turn and turn.needs_human:
                 client.needs_human = True
@@ -785,7 +791,7 @@ class ConversationService:
             repair = await self._safe_repair(
                 client, history, user_message, rejection_reason, catalog_result or ""
             )
-            repair_reason = _ai_rejection_reason(repair)
+            repair_reason = _ai_rejection_reason(repair, catalog_result)
             if (
                 repair_reason is None
                 and repair is not None
@@ -801,25 +807,20 @@ class ConversationService:
                     repair_reason or "not_grounded",
                     repair.needs_human,
                 )
-            catalog_reply = grounded_search_reply(
-                catalog_result or "",
-                client.name,
-                history[-1].assistant_message if history else None,
+            catalog_reply = (
+                None
+                if rejection_reason in {"unsafe_reply", "invalid_reply"}
+                else grounded_search_reply(
+                    catalog_result or "",
+                    client.name,
+                    history[-1].assistant_message if history else None,
+                )
             )
             if catalog_reply:
                 reply = catalog_reply
             else:
-                quote = grounded_quote_reply(
-                    client.product or "",
-                    client.name,
-                    client.volume,
-                    history[-1].assistant_message if history else None,
-                )
-                if quote:
-                    reply = quote
-                else:
-                    reply = FALLBACK
-                    client.comment = "Нужен ответ менеджера"
+                reply = FALLBACK
+                client.comment = "Нужен ответ менеджера"
             return await self._finish(client, user_message, BotReply(reply, delay=False), now)
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now

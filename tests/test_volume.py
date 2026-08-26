@@ -3,12 +3,10 @@ from datetime import datetime, timezone
 import pytest
 
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
-from stokozavr_bot.product_catalog import budget_quote
 from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import (
     VOLUME_QUESTION,
     ConversationService,
-    extract_budget,
     extract_volume,
 )
 
@@ -46,15 +44,6 @@ def test_extract_volume_preserves_explicit_packaging_amount(raw):
     value = extract_volume(raw)
     assert value is not None
     assert value.lower() == raw.lower()
-
-
-@pytest.mark.parametrize("raw", ["на 10000 рублей", "бюджетом 10 000 ₽", "до 10000 руб."])
-def test_extract_budget_accepts_common_russian_forms(raw):
-    assert extract_budget(raw) == 10000
-
-
-def test_budget_quote_uses_only_confirmed_primary_price():
-    assert budget_quote("сок яблочный", 10000) == (11, 210, "890 ₽ за упаковку")
 
 
 @pytest.mark.asyncio
@@ -108,14 +97,17 @@ async def test_thirty_six_cans_are_saved_and_next_reply_does_not_ask_volume(now)
 
 
 @pytest.mark.asyncio
-async def test_budget_is_saved_and_calculated_only_for_confirmed_catalog_price(now):
+async def test_explicit_budget_is_saved_as_semantic_fact_without_code_calculation(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(
         ClientProfile(telegram_id=4, name="Дмитрий", product="сок яблочный", contact_skipped=True)
     )
     service = ConversationService(
         repo,
-        SemanticAI([IntakeAnalysis(intent="offtopic")], []),
+        SemanticAI(
+            [IntakeAnalysis(intent="question", budget=10000)],
+            [AiTurn(reply="Уточню цену и вернусь с предложением.")],
+        ),
         clock=lambda: now,
     )
 
@@ -123,9 +115,8 @@ async def test_budget_is_saved_and_calculated_only_for_confirmed_catalog_price(n
     saved = await repo.get_client(4)
 
     assert saved.budget == 10000
-    assert "11 упаковок" in result.text
-    assert "210 ₽" in result.text
-    assert result.text.count("?") == 1
+    assert result.text == "Уточню цену и вернусь с предложением."
+    assert "11 упаковок" not in result.text
 
 
 @pytest.mark.asyncio
@@ -157,6 +148,6 @@ async def test_after_volume_broken_ai_still_quotes_catalog_price(now):
 
     result = await service.handle(IncomingMessage(2, None, "200 кг"))
 
-    assert "уточню этот вопрос" in result.text.lower()
-    assert "640" not in result.text
-    assert "пенз" not in result.text.lower()
+    assert "уточню этот вопрос" not in result.text.lower()
+    assert "огурцы" in result.text.lower()
+    assert "680 ₽" in result.text

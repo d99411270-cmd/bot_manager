@@ -117,6 +117,7 @@ async def test_intake_analyzer_uses_separate_prompt_and_parses_contract():
                 "phone": "+7 999 123-45-67",
                 "product": None,
                 "volume": None,
+                "budget": None,
             },
             "reply": None,
         }
@@ -150,7 +151,13 @@ async def test_both_deepseek_prompts_include_one_shared_business_context():
         else:
             result = {
                 "intent": "question",
-                "entities": {"name": None, "phone": None, "product": None, "volume": None},
+                "entities": {
+                    "name": None,
+                    "phone": None,
+                    "product": None,
+                    "volume": None,
+                    "budget": None,
+                },
                 "reply": None,
             }
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
@@ -178,7 +185,13 @@ async def test_both_deepseek_prompts_include_personality_and_company_memory():
         else:
             result = {
                 "intent": "question",
-                "entities": {"name": None, "phone": None, "product": None, "volume": None},
+                "entities": {
+                    "name": None,
+                    "phone": None,
+                    "product": None,
+                    "volume": None,
+                    "budget": None,
+                },
                 "reply": None,
             }
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
@@ -290,7 +303,13 @@ async def test_reasoning_content_is_used_when_message_content_empty():
         {"intent": "greeting", "entities": {"name": None}, "reply": None},
         {
             "intent": "greeting",
-            "entities": {"name": None, "phone": None, "product": None, "volume": None},
+            "entities": {
+                "name": None,
+                "phone": None,
+                "product": None,
+                "volume": None,
+                "budget": None,
+            },
             "reply": 123,
         },
     ],
@@ -402,7 +421,13 @@ async def test_analyze_intake_does_not_send_catalog_tools():
         captured.update(json.loads(request.content))
         result = {
             "intent": "question",
-            "entities": {"name": None, "phone": None, "product": None, "volume": None},
+            "entities": {
+                "name": None,
+                "phone": None,
+                "product": None,
+                "volume": None,
+                "budget": None,
+            },
             "reply": None,
         }
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
@@ -463,3 +488,31 @@ async def test_repair_response_receives_reason_and_catalog_without_tools():
         item["content"] for item in captured["messages"] if item["role"] == "system"
     )
     assert "tools" not in captured
+
+
+@pytest.mark.asyncio
+async def test_intake_extracts_only_explicit_budget_as_semantic_fact():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        result = {
+            "intent": "question",
+            "entities": {
+                "name": None,
+                "phone": None,
+                "product": None,
+                "volume": None,
+                "budget": 10000,
+            },
+            "reply": None,
+        }
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await DeepSeekClient("key", client=http).analyze_intake(
+            ClientProfile(1), [], "до 10000 рублей"
+        )
+
+    assert result.budget == 10000
+    assert "зависит от цены" in captured["messages"][0]["content"]

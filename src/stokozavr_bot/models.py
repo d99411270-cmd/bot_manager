@@ -68,6 +68,7 @@ class IntakeAnalysis:
     phone: str | None = None
     product: str | None = None
     volume: str | None = None
+    budget: int | None = None
     reply: str | None = None
 
 

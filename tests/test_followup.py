@@ -76,7 +76,7 @@ async def test_price_reply_schedules_followup(now=NOW):
     )
     service = ConversationService(
         repo,
-        FakeAI([AiTurn(reply="Груши 1 100 ₽ за ящик. Какой объём берёте?")]),
+        FakeAI([AiTurn(reply="Груши 880 ₽ за ящик. Какой объём берёте?")]),
         clock=lambda: now,
     )
     await service.handle(IncomingMessage(8, None, "Сколько груши?"))

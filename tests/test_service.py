@@ -137,13 +137,13 @@ async def test_catalog_price_reply_is_sent(now):
             status="квалифицирован",
         )
     )
-    reply = "Яблоки 850 ₽ за ящик, груши 1 100 ₽ за ящик. Какой объём нужен?"
+    reply = "Яблоки 820 ₽ за ящик, груши 880 ₽ за ящик. Какой объём нужен?"
     service = ConversationService(repo, FakeAI([AiTurn(reply=reply)]), clock=lambda: now)
 
     result = await service.handle(IncomingMessage(1, None, "Сколько стоят груши и яблоки?"))
 
-    assert "грушевый лог" in result.text.lower()
-    assert "880 ₽" in result.text
+    assert "груши 880 ₽" in result.text.lower()
+    assert "яблоки 820 ₽" in result.text.lower()
 
 
 @pytest.mark.asyncio
@@ -163,8 +163,9 @@ async def test_qualitative_stock_reply_is_sent(now):
 
     result = await service.handle(IncomingMessage(1, None, "Какие овощи сейчас в наличии?"))
 
-    assert "зелёный ряд" in result.text.lower()
-    assert "680 ₽" in result.text
+    assert "картофель" in result.text.lower()
+    assert "много" in result.text.lower()
+    assert "объём нужен" in result.text.lower()
 
 
 @pytest.mark.asyncio
@@ -302,3 +303,48 @@ async def test_ai_gets_profile_and_recent_history_only(now):
     assert profile.name == "Мария"
     assert len(history) == 10
     assert history[0].user_message == "q5"
+
+
+@pytest.mark.asyncio
+async def test_price_hesitation_keeps_known_volume_and_uses_catalog_grounded_ai(now):
+    class PriceHesitationAI(FakeAI):
+        def __init__(self):
+            super().__init__(
+                [
+                    AiTurn(
+                        reply="Горошек зелёный — 720 ₽ за упаковку. Подойдёт такая цена?",
+                        needs_human=False,
+                    )
+                ]
+            )
+            self.catalog_calls = []
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append((profile, history, message, catalog_result))
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=44,
+            name="Дмитрий",
+            phone="+799****0044",
+            product="горошек",
+            volume="36 банок",
+            status="квалифицирован",
+            contact_skipped=False,
+        )
+    )
+    ai = PriceHesitationAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(44, None, "Зависит от цены"))
+
+    assert "720 ₽" in result.text
+    assert "объём продукции вам необходим" not in result.text.lower()
+    assert len(ai.catalog_calls) == 1
+    profile, _history, message, catalog_result = ai.catalog_calls[0]
+    assert profile.volume == "36 банок"
+    assert message == "Зависит от цены"
+    assert "CAN-PEAS-001" in catalog_result
+    assert "36 банок" not in result.text or "объём" not in result.text.lower()

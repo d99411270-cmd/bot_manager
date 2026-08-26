@@ -259,25 +259,3 @@ def grounded_quote_reply(
         f"производитель — {record.manufacturer}; сейчас {record.availability}."
     )
     return f"{prefix}{line} {ending}"
-
-
-def budget_quote(product: str, budget: int) -> tuple[int, int, str] | None:
-    """Calculate packages and leftover only for one confirmed primary price."""
-    tokens = [token for token in re.split(r"\s+", (product or "").lower()) if len(token) >= 3]
-    candidates = [
-        record
-        for record in _all_records()
-        if not record.is_competitor
-        and (
-            (product or "").strip().lower() in record.subcategory.lower()
-            or all(token in record.subcategory.lower() for token in tokens)
-            or (len(tokens) == 1 and tokens[0] == record.category.lower())
-        )
-    ]
-    if len(candidates) != 1 or budget <= 0:
-        return None
-    amounts = re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", candidates[0].price.lower())
-    if not amounts:
-        return None
-    price = int(re.sub(r"\s+", "", amounts[0]))
-    return budget // price, budget % price, candidates[0].price
