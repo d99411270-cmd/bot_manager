@@ -6,7 +6,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from stokozavr_bot.catalog_quotes import LineTotalQuote
 
 _REPO_CATALOG = Path(__file__).resolve().parents[2] / "catalog"
 _FILENAME_ALIASES = {
@@ -300,6 +303,30 @@ def unit_price_catalog_result(product: str, unit: str) -> tuple[str, UnitPriceQu
         raw + f"; Подтверждённый расчёт: {quote.total_quantity} в упаковке; {quote.unit_price}",
         quote,
     )
+
+
+def line_total_catalog_result(
+    product: str,
+    quantity: str,
+    *,
+    include_linked_competitor: bool = False,
+) -> tuple[str, LineTotalQuote] | None:
+    from stokozavr_bot.catalog_quotes import QuoteFailure, line_total_quote
+
+    quote = line_total_quote(
+        product,
+        quantity,
+        include_linked_competitor=include_linked_competitor,
+    )
+    if isinstance(quote, QuoteFailure):
+        return None
+    record = quote.record
+    raw = (
+        f"Категория: {record.category}; Подкатегория: {record.subcategory}; SKU: {record.sku}; "
+        f"Производитель: {record.manufacturer}; Фасовка: {record.packaging}; Цена: {record.price}; "
+        f"Статус наличия: {record.availability}; Дата обновления: {record.updated_at}"
+    )
+    return raw + f"; Подтверждённый расчёт: {quote.human_line}", quote
 
 
 def _category_listing(files: list[tuple[str, str]]) -> str:
