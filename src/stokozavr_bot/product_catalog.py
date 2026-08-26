@@ -16,7 +16,7 @@ from stokozavr_bot.catalog_tokens import (
 )
 
 if TYPE_CHECKING:
-    from stokozavr_bot.catalog_quotes import LineTotalQuote
+    from stokozavr_bot.catalog_quotes import LineTotalQuote, NearestPackQuote
 
 _REPO_CATALOG = Path(__file__).resolve().parents[2] / "catalog"
 _FILENAME_ALIASES = {
@@ -300,7 +300,7 @@ def line_total_catalog_result(
     quantity: str,
     *,
     include_linked_competitor: bool = False,
-) -> tuple[str, LineTotalQuote] | None:
+) -> tuple[str, LineTotalQuote | NearestPackQuote] | None:
     from stokozavr_bot.catalog_quotes import QuoteFailure, line_total_quote
 
     quote = line_total_quote(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 from stokozavr_bot.catalog_tokens import (
@@ -117,6 +117,26 @@ class LineTotalQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class PackOption:
+    pack_count: int
+    content_total: Decimal
+    total_amount: Decimal
+    total: str
+    human_line: str
+
+
+@dataclass(frozen=True, slots=True)
+class NearestPackQuote:
+    record: CatalogRecord
+    requested_quantity: str
+    requested_unit: str
+    lower: PackOption | None
+    upper: PackOption | None
+    allowed_amounts: frozenset[str]
+    human_line: str
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteFailure:
     reason: str
 
@@ -158,6 +178,28 @@ def parse_requested_quantities(text: str) -> list[tuple[int, int, RequestedQuant
                 RequestedQuantity(amount=amount, unit=unit, raw=match.group(0)),
             )
         )
+    reversed_pattern = r"(литр\w*|кг|килограмм\w*)\s+(\d+(?:[.,]\d+)?)"
+    for match in re.finditer(reversed_pattern, lowered):
+        if any(
+            start <= match.start() < end or start < match.end() <= end for start, end, _qty in found
+        ):
+            continue
+        if re.search(r"₽|руб", lowered[match.end() : match.end() + 4]):
+            continue
+        unit = _normalize_unit(match.group(1))
+        if unit is None:
+            continue
+        amount = _decimal(match.group(2))
+        if amount <= 0:
+            continue
+        found.append(
+            (
+                match.start(),
+                match.end(),
+                RequestedQuantity(amount=amount, unit=unit, raw=match.group(0)),
+            )
+        )
+    found.sort(key=lambda item: item[0])
     return found
 
 
@@ -248,7 +290,7 @@ def line_total_quote(
     *,
     include_linked_competitor: bool = False,
     records: Iterable[CatalogRecord] | None = None,
-) -> LineTotalQuote | QuoteFailure:
+) -> LineTotalQuote | NearestPackQuote | QuoteFailure:
     requested = parse_requested_quantity(quantity)
     if requested is None:
         return QuoteFailure("invalid_quantity")
@@ -319,15 +361,17 @@ def _select_record(
 
 def _quote_record(
     record: CatalogRecord, requested: RequestedQuantity
-) -> LineTotalQuote | QuoteFailure:
-    reason = _resolution_reason(record, requested)
-    if reason != "ok":
-        return QuoteFailure(reason)
+) -> LineTotalQuote | NearestPackQuote | QuoteFailure:
     spec = parse_packaging(record.packaging)
     price = _price_decimal(record.price)
-    pack_count = _pack_count_for(spec, requested) if spec is not None else None
-    if spec is None or price is None or pack_count is None or pack_count <= 0:
+    if spec is None or price is None:
         return QuoteFailure("incomplete_record")
+    pack_count = _pack_count_for(spec, requested)
+    if pack_count is None:
+        return QuoteFailure("incompatible_unit")
+    if pack_count == 0:
+        nearest = _nearest_pack_quote(record, requested, spec, price)
+        return nearest if nearest is not None else QuoteFailure("non_integer_packs")
     total = (price * pack_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     allowed = {_format_amount(price), _format_amount(total)}
     allowed.update(_derived_unit_prices(spec, price))
@@ -340,6 +384,82 @@ def _quote_record(
         total=f"{_format_amount(total)} ₽",
         human_line=_human_line(record, spec, pack_count, total),
         allowed_amounts=frozenset(allowed),
+    )
+
+
+def _ratio_for(spec: PackagingSpec, requested: RequestedQuantity) -> Decimal | None:
+    unit = requested.unit
+    if unit in _PACK_UNITS:
+        if unit != "упаковка" and unit != spec.container:
+            return None
+        if unit == "упаковка" and spec.container not in _PACK_UNITS:
+            return None
+        return requested.amount
+    if unit in _PIECE_UNITS:
+        if spec.piece_count is None or spec.piece_count <= 0:
+            return None
+        return requested.amount / Decimal(spec.piece_count)
+    if unit != spec.content_unit or spec.content_amount <= 0:
+        return None
+    return requested.amount / spec.content_amount
+
+
+def _pack_option(
+    record: CatalogRecord, spec: PackagingSpec, price: Decimal, pack_count: int
+) -> PackOption:
+    total = (price * pack_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    content_total = spec.content_amount * pack_count
+    label = _plural_container(spec.container, pack_count)
+    if spec.content_unit in {"кг", "л"}:
+        detail = f"{pack_count} {label} = {_format_amount(content_total)} {spec.content_unit}"
+    else:
+        detail = f"{pack_count} {label}"
+    return PackOption(
+        pack_count=pack_count,
+        content_total=content_total,
+        total_amount=total,
+        total=f"{_format_amount(total)} ₽",
+        human_line=f"{record.subcategory}: {detail} — {_format_amount(total)} ₽",
+    )
+
+
+def _nearest_pack_quote(
+    record: CatalogRecord,
+    requested: RequestedQuantity,
+    spec: PackagingSpec,
+    price: Decimal,
+) -> NearestPackQuote | None:
+    ratio = _ratio_for(spec, requested)
+    if ratio is None or ratio <= 0:
+        return None
+    floor = int(ratio.to_integral_value(rounding=ROUND_DOWN))
+    if ratio == Decimal(floor):
+        return None
+    lower = _pack_option(record, spec, price, floor) if floor >= 1 else None
+    upper = _pack_option(record, spec, price, floor + 1)
+    allowed = {_format_amount(price)}
+    allowed.update(_derived_unit_prices(spec, price))
+    parts: list[str] = []
+    if lower is not None:
+        allowed.add(_format_amount(lower.total_amount))
+        parts.append(
+            f"{lower.pack_count} {_plural_container(spec.container, lower.pack_count)} = "
+            f"{_format_amount(lower.content_total)} {spec.content_unit} — {lower.total}"
+        )
+    allowed.add(_format_amount(upper.total_amount))
+    parts.append(
+        f"{upper.pack_count} {_plural_container(spec.container, upper.pack_count)} = "
+        f"{_format_amount(upper.content_total)} {spec.content_unit} — {upper.total}"
+    )
+    joined = " или ".join(parts)
+    return NearestPackQuote(
+        record=record,
+        requested_quantity=requested.raw,
+        requested_unit=requested.unit,
+        lower=lower,
+        upper=upper,
+        allowed_amounts=frozenset(allowed),
+        human_line=f"{record.subcategory}: {joined}",
     )
 
 

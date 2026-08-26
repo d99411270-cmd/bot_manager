@@ -9,6 +9,7 @@ from typing import Protocol
 from .catalog_quotes import (
     CompositeLineTotals,
     LineTotalQuote,
+    NearestPackQuote,
     _product_terms,
     derived_allowed_amounts,
     parse_requested_quantity,
@@ -275,14 +276,6 @@ def asks_for_competitor(text: str) -> bool:
     return bool(re.search(r"подешев\w*|есть вариант\w*|сравн\w*|альтернатив\w*", text.lower()))
 
 
-def should_offer_price_list(text: str) -> bool:
-    lowered = text.lower()
-    return bool(
-        asks_about_assortment(text)
-        or re.search(r"прайс|каталог|список|всё нужно|все нужно|разн\w+ продукц|не знаю", lowered)
-    )
-
-
 def asks_for_price_list(text: str) -> bool:
     if cancels_price_list(text):
         return False
@@ -321,7 +314,6 @@ def _price_list_pending_from_history(history: list[HistoryEntry]) -> bool:
     return asks_for_price_list(latest.user_message) and "почт" in latest.assistant_message.lower()
 
 
-PRICE_LIST_OFFER = "Могу проконсультировать по товарам или выслать актуальный прайс."
 PRICE_LIST_CHAT_REPLY = "Отправляю актуальный прайс прямо сюда."
 PRICE_LIST_FILENAME = "stokozavr-price-list.md"
 
@@ -531,7 +523,7 @@ def extract_volume(text: str) -> str | None:
     match = re.search(
         r"(?:пол)?паллет\w*|\d+(?:[.,]\d+)?\s*(?:кг|килограмм\w*|тонн\w*|короб\w*|"
         r"ящик\w*|бан\w*|паллет\w*|упаков\w*|сет(?:ок|к\w*)|шт\.?|штук\w*|литр\w*|"
-        r"г(?:р(?:амм\w*)?)?\.?|грамм\w*)",
+        r"г(?:р(?:амм\w*)?)?\.?|грамм\w*)|(?:литр\w*|килограмм\w*)\s+\d+(?:[.,]\d+)?",
         text.lower(),
     )
     if not match:
@@ -669,11 +661,7 @@ def _reject_turn(
         claimed = re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", turn.reply.lower())
         if not claimed or not _catalog_has_positions(catalog_result or ""):
             return "invalid_reply"
-    if (
-        client.volume
-        and _catalog_has_positions(catalog_result or "")
-        and "не могу подтвердить" in turn.reply.lower()
-    ):
+    if _catalog_has_positions(catalog_result or "") and "не могу подтвердить" in turn.reply.lower():
         return "invalid_reply"
     return None
 
@@ -691,6 +679,23 @@ def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> 
         if unit:
             reply += f". {unit.unit_price}"
     return reply + "."
+
+
+def _format_nearest_pack_reply(quote: NearestPackQuote, name: str | None = None) -> str:
+    prefix = f"{name}, " if name else ""
+    record = quote.record
+    return (
+        f"{prefix}{quote.human_line} "
+        f"({record.price} за {record.packaging}; производитель — {record.manufacturer})."
+    )
+
+
+def _format_grounded_quote_reply(
+    quote: LineTotalQuote | NearestPackQuote, name: str | None = None
+) -> str:
+    if isinstance(quote, NearestPackQuote):
+        return _format_nearest_pack_reply(quote, name)
+    return _format_line_total_reply(quote, name)
 
 
 def _format_composite_reply(combined: CompositeLineTotals, name: str | None = None) -> str:
@@ -737,7 +742,7 @@ def _resolve_line_total_catalog(
     semantic: IntakeAnalysis | None,
     client: ClientProfile,
     catalog_query: str | None = None,
-) -> tuple[str, LineTotalQuote] | None:
+) -> tuple[str, LineTotalQuote | NearestPackQuote] | None:
     quantity = _requested_quote_quantity(text, semantic, client)
     if quantity is None:
         return None
@@ -765,15 +770,15 @@ def _volume_grounded_reply(
     client: ClientProfile,
     catalog_result: str,
     previous_reply: str | None = None,
-    line_quote: LineTotalQuote | None = None,
+    line_quote: LineTotalQuote | NearestPackQuote | None = None,
 ) -> str | None:
     if line_quote:
-        return _format_line_total_reply(line_quote, client.name)
+        return _format_grounded_quote_reply(line_quote, client.name)
     if client.volume:
         topic = client.current_interest or client.product or ""
         calculated = line_total_catalog_result(topic, client.volume) if topic else None
         if calculated:
-            return _format_line_total_reply(calculated[1], client.name)
+            return _format_grounded_quote_reply(calculated[1], client.name)
         quote = grounded_quote_reply(topic, client.name, client.volume, previous_reply)
         if quote:
             return quote
@@ -1259,7 +1264,6 @@ class ConversationService:
                     message.text,
                     BotReply(reply_text),
                     now,
-                    add_price_list_offer=False,
                 )
         if (
             requested_identity_slot(client) == "phone"
@@ -1356,7 +1360,6 @@ class ConversationService:
                 message.text,
                 BotReply("Хорошо, без прайса."),
                 now,
-                add_price_list_offer=False,
             )
         if asks_for_price_list_in_chat(text) or (pending_price_list and _mentions_chat_here(text)):
             client.price_list_requested = True
@@ -1370,7 +1373,6 @@ class ConversationService:
                     attachment_filename=PRICE_LIST_FILENAME,
                 ),
                 now,
-                add_price_list_offer=False,
             )
         if asks_for_price_list(text):
             client.price_list_requested = True
@@ -1381,7 +1383,6 @@ class ConversationService:
                 message.text,
                 BotReply(EMAIL_QUESTION, delay=False),
                 now,
-                add_price_list_offer=False,
             )
         if self._is_fulfillment_turn(client, text):
             return await self._handle_fulfillment(client, text, now)
@@ -1522,7 +1523,14 @@ class ConversationService:
         requested_unit = (
             semantic.unit_price_request if semantic else None
         ) or _infer_unit_price_request(text)
-        if requested_unit:
+        text_quantity = parse_requested_quantity(text)
+        order_in_text = bool(
+            text_quantity
+            and not _volume_is_unit_price_probe(
+                text, text_quantity.raw, requested_unit or text_quantity.unit
+            )
+        )
+        if requested_unit and not order_in_text:
             utterance_target = _utterance_search_key(text)
             target = (
                 (semantic.target_product if semantic else None)
@@ -1622,7 +1630,7 @@ class ConversationService:
 
         turn = await self._safe_respond(client, history, message.text, catalog_result)
         rejection_reason = _reject_turn(turn, catalog_result, client)
-        if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
+        if (unit_quote or line_quote) and turn and _is_generic_fallback_reply(turn.reply):
             rejection_reason = "invalid_reply"
         if rejection_reason is None and turn is not None:
             self._remember_catalog_interest(client, catalog_result, turn.reply, message.text)
@@ -1678,7 +1686,7 @@ class ConversationService:
             return await self._finish(
                 client,
                 message.text,
-                BotReply(_format_line_total_reply(line_quote, client.name)),
+                BotReply(_format_grounded_quote_reply(line_quote, client.name)),
                 now,
             )
 
@@ -2067,7 +2075,7 @@ class ConversationService:
         now: datetime,
         catalog_result: str | None = None,
         unit_quote: UnitPriceQuote | None = None,
-        line_quote: LineTotalQuote | None = None,
+        line_quote: LineTotalQuote | NearestPackQuote | None = None,
         composite_quote: CompositeLineTotals | None = None,
     ) -> BotReply:
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
@@ -2084,10 +2092,16 @@ class ConversationService:
         ):
             self._remember_catalog_interest(client, catalog_result, turn.reply, user_message)
         rejection_reason = _reject_turn(turn, catalog_result, client)
-        if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
+        if (unit_quote or line_quote) and turn and _is_generic_fallback_reply(turn.reply):
             rejection_reason = "invalid_reply"
         if rejection_reason is not None:
-            if turn and turn.needs_human and not unit_quote and not catalog_no_match:
+            if (
+                turn
+                and turn.needs_human
+                and not unit_quote
+                and not line_quote
+                and not catalog_no_match
+            ):
                 client.needs_human = True
             logger.warning(
                 "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
@@ -2109,7 +2123,6 @@ class ConversationService:
                     user_message,
                     BotReply(repair.reply.strip(), delay=False),
                     now,
-                    add_price_list_offer=not catalog_no_match,
                 )
             if repair is not None:
                 logger.warning(
@@ -2129,7 +2142,6 @@ class ConversationService:
                     user_message,
                     BotReply(open_turn.reply.strip(), delay=False),
                     now,
-                    add_price_list_offer=not catalog_no_match,
                 )
             if catalog_no_match:
                 _remember_catalog_no_match(client, client.catalog_no_match_query)
@@ -2138,7 +2150,6 @@ class ConversationService:
                     user_message,
                     BotReply(CATALOG_NO_MATCH_REPLY, delay=False),
                     now,
-                    add_price_list_offer=False,
                 )
             deterministic_recovery = _deterministic_recovery_reply(
                 user_message, catalog_result or ""
@@ -2165,7 +2176,7 @@ class ConversationService:
                 return await self._finish(
                     client,
                     user_message,
-                    BotReply(_format_line_total_reply(line_quote, client.name), delay=False),
+                    BotReply(_format_grounded_quote_reply(line_quote, client.name), delay=False),
                     now,
                 )
             listing = _category_listing_reply(catalog_result or "", user_message)
@@ -2254,7 +2265,6 @@ class ConversationService:
                 user_message,
                 BotReply((turn.reply if turn else CATALOG_NO_MATCH_REPLY).strip(), delay=True),
                 now,
-                add_price_list_offer=False,
             )
         return await self._finish(
             client, user_message, BotReply(turn.reply.strip(), delay=True), now
@@ -2336,21 +2346,11 @@ class ConversationService:
         user_message: str,
         reply: BotReply,
         now: datetime,
-        *,
-        add_price_list_offer: bool = True,
     ) -> BotReply:
         apply_followup_rules(client, user_message, reply.text, now, self.followup_delay)
         safe_text = limit_competitor_mentions(
             client, reply.text, allowed=asks_for_competitor(user_message)
         )
-        if (
-            add_price_list_offer
-            and should_offer_price_list(user_message)
-            and not client.price_list_sent_at
-            and "актуальный прайс" not in safe_text.lower()
-            and not _is_generic_fallback_reply(safe_text)
-        ):
-            safe_text = PRICE_LIST_OFFER + "\n\n" + safe_text
         reply = BotReply(
             safe_text,
             request_contact=reply.request_contact,

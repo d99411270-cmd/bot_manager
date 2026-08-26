@@ -128,14 +128,16 @@ async def test_assortment_after_successful_price_send_does_not_repeat_offer(now)
 
 
 @pytest.mark.asyncio
-async def test_normal_assortment_only_offers_price_list_without_attachment(now):
+async def test_normal_assortment_does_not_offer_or_attach_price_list(now):
     repository = InMemoryCRMRepository()
     await repository.save_client(ClientProfile(telegram_id=707, name="Анна", phone="+799****4567"))
     service = ConversationService(repository, AssortmentAI(), clock=lambda: now)
 
     result = await service.handle(IncomingMessage(707, None, "Какой у вас ассортимент?"))
 
-    assert "выслать актуальный прайс" in result.text.lower()
+    assert result.text == "В каталоге есть категории продуктов."
+    assert "выслать актуальный прайс" not in result.text.lower()
+    assert "могу проконсультировать по товарам" not in result.text.lower()
     assert result.attachment_content is None
 
 

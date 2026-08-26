@@ -375,7 +375,8 @@ async def test_assortment_question_without_phone_uses_ai_not_form(now):
     saved = await repo.get_client(100)
 
     assert result.text.endswith(ai_reply)
-    assert "выслать актуальный прайс" in result.text.lower()
+    assert "выслать актуальный прайс" not in result.text.lower()
+    assert "могу проконсультировать по товарам" not in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert "как я могу к вам обращаться" not in result.text.lower()
     assert "номер телефона" not in result.text.lower()
@@ -488,7 +489,8 @@ async def test_fruits_question_without_phone_does_not_contain_product_question(n
     saved = await repo.get_client(200)
 
     assert result.text.endswith(ai_reply)
-    assert "выслать актуальный прайс" in result.text.lower()
+    assert "выслать актуальный прайс" not in result.text.lower()
+    assert "могу проконсультировать по товарам" not in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert PRODUCT_ASSORTMENT not in result.text
     assert "номер телефона" not in result.text.lower()
@@ -514,7 +516,8 @@ async def test_name_capture_does_not_interrupt_product_answer(now):
     saved = await repo.get_client(201)
 
     assert result.text.endswith(ai_reply)
-    assert "выслать актуальный прайс" in result.text.lower()
+    assert "выслать актуальный прайс" not in result.text.lower()
+    assert "могу проконсультировать по товарам" not in result.text.lower()
     assert saved.name == "Анна"
     assert saved.phone is None
     assert saved.product is None

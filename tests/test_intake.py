@@ -427,7 +427,7 @@ async def test_assortment_question_answers_even_when_deepseek_fails(now):
 
 
 @pytest.mark.asyncio
-async def test_assortment_answer_offers_generated_price_list(now):
+async def test_assortment_answer_does_not_offer_generated_price_list(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(ClientProfile(63, name="Дмитрий", phone="+799****4567"))
     service = ConversationService(
@@ -440,4 +440,6 @@ async def test_assortment_answer_offers_generated_price_list(now):
 
     result = await service.handle(IncomingMessage(63, None, "какой у вас ассортимент?"))
 
-    assert "выслать актуальный прайс" in result.text.lower()
+    assert "выслать актуальный прайс" not in result.text.lower()
+    assert "могу проконсультировать по товарам" not in result.text.lower()
+    assert "категории" in result.text.lower()

@@ -172,14 +172,22 @@ def test_ambiguous_category_does_not_invent_a_total():
     assert result.reason == "ambiguous_product"
 
 
-def test_non_integer_pack_count_does_not_invent_a_total():
+def test_non_integer_pack_count_offers_nearest_packs_without_inventing_a_blend():
     apples = line_total_quote("яблоки", "15 кг")
     corn = line_total_quote("кукуруза сладкая", "10 банок")
 
-    assert isinstance(apples, QuoteFailure)
-    assert apples.reason == "non_integer_packs"
-    assert isinstance(corn, QuoteFailure)
-    assert corn.reason == "non_integer_packs"
+    assert type(apples).__name__ == "NearestPackQuote"
+    assert apples.lower is not None and apples.upper is not None
+    assert apples.lower.pack_count == 1
+    assert apples.lower.total == "820 ₽"
+    assert apples.upper.pack_count == 2
+    assert apples.upper.total == "1640 ₽"
+    assert "1230" not in apples.allowed_amounts
+    assert type(corn).__name__ == "NearestPackQuote"
+    assert corn.lower is None
+    assert corn.upper is not None
+    assert corn.upper.pack_count == 1
+    assert corn.upper.total == "690 ₽"
 
 
 def test_incomplete_record_does_not_invent_a_total():
