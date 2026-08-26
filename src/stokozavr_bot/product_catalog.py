@@ -234,31 +234,40 @@ def unit_price_quote(product: str, unit: str) -> UnitPriceQuote | None:
     }.get(unit.strip().lower())
     if requested is None:
         return None
-    terms = [token for token in re.findall(r"[\w-]+", (product or "").lower()) if len(token) >= 3]
     matches = [
         (
-            sum(token in f"{record.category} {record.subcategory}".lower() for token in terms),
+            catalog_record_score(
+                product,
+                category=record.category,
+                subcategory=record.subcategory,
+                sku=record.sku,
+                manufacturer=record.manufacturer,
+            ),
             record,
         )
         for record in _all_records()
         if not record.is_competitor
     ]
-    matches = [(score, record) for score, record in matches if score]
+    matches = [(score, record) for score, record in matches if score > 0]
     if not matches:
         return None
     best_score = max(score for score, _record in matches)
     candidates = [record for score, record in matches if score == best_score]
     if len(candidates) != 1:
         return None
-    parsed = _parse_packaging_quantity(candidates[0].packaging)
+    from stokozavr_bot.catalog_quotes import parse_packaging
+
+    spec = parse_packaging(candidates[0].packaging)
     price = _price_amount(candidates[0].price)
-    piece_count = _packaging_piece_count(candidates[0].packaging)
-    if parsed is None or price is None or piece_count is None or piece_count <= 0:
+    if spec is None or price is None:
         return None
-    total, normalized = parsed
     if requested == "шт":
-        total, normalized = piece_count, "шт"
-    elif normalized != requested:
+        if spec.piece_count is None or spec.piece_count <= 0:
+            return None
+        total, normalized = float(spec.piece_count), "шт"
+    elif spec.content_unit == requested and spec.content_amount > 0:
+        total, normalized = float(spec.content_amount), requested
+    else:
         return None
     amount = price / total
     rendered_price = f"{amount:.2f}" if amount % 1 else f"{amount:.0f}"

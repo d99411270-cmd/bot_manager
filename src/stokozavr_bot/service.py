@@ -10,6 +10,7 @@ from .catalog_quotes import (
     CompositeLineTotals,
     LineTotalQuote,
     _product_terms,
+    derived_allowed_amounts,
     parse_requested_quantity,
 )
 from .catalog_tokens import expand_query_terms, term_matches_haystack
@@ -186,7 +187,30 @@ def asks_for_unverified_info(text: str) -> bool:
     )
 
 
+_BROAD_ASSORTMENT_PHRASES = frozenset(
+    {
+        "вся",
+        "все",
+        "все что есть",
+        "что есть",
+        "все что имеется",
+        "что имеется",
+    }
+)
+
+
+def _normalize_utterance(text: str) -> str:
+    return re.sub(r"[^а-яёa-z0-9]+", " ", (text or "").lower()).strip().replace("ё", "е")
+
+
+def _is_broad_assortment_utterance(text: str) -> bool:
+    """«Вся/все/всё что есть» is assortment browse, not an SKU."""
+    return _normalize_utterance(text) in _BROAD_ASSORTMENT_PHRASES
+
+
 def asks_about_assortment(text: str) -> bool:
+    if _is_broad_assortment_utterance(text):
+        return True
     lowered = text.strip().lower()
     mentions_category = bool(
         re.search(
@@ -377,7 +401,31 @@ def is_unsafe_claim(text: str, catalog_result: str | None = None) -> bool:
             r"(\d[\d\s]*(?:[.,]\d+)?)\s*(?:₽|руб)", catalog_result or "", re.IGNORECASE
         )
     } | {str(value) for value in PENZA_PROMO_AMOUNTS}
+    allowed.update(_structured_allowed_amounts(catalog_result))
     return any(amount not in allowed for amount in claimed)
+
+
+def _structured_allowed_amounts(catalog_result: str | None) -> set[str]:
+    """Allow pack prices and derived ₽/кг / ₽/л / ₽/шт from records in this turn."""
+    if not catalog_result:
+        return set()
+    allowed: set[str] = set()
+    skus = {
+        sku.upper() for sku in re.findall(r"SKU:\s*([A-Z0-9-]+)", catalog_result, re.IGNORECASE)
+    }
+    for record in _all_records():
+        if record.sku.upper() not in skus:
+            continue
+        for amount in derived_allowed_amounts(record.packaging, record.price):
+            allowed.add(_normalize_claim_amount(amount))
+        quote = unit_price_quote(record.subcategory, "кг") or unit_price_quote(
+            record.subcategory, "л"
+        )
+        if quote:
+            match = re.search(r"(\d+(?:[.,]\d+)?)", quote.unit_price)
+            if match:
+                allowed.add(_normalize_claim_amount(match.group(1)))
+    return allowed
 
 
 def _catalog_supports_claim(reply: str, catalog_result: str | None) -> bool:
@@ -436,11 +484,26 @@ def _infer_unit_price_request(text: str) -> str | None:
         lowered,
     ):
         return "шт"
-    if re.search(r"за\s+(?:каждый\s+)?(?:кг|килограмм\w*)|на\s+килограмм", lowered):
+    if re.search(
+        r"за\s+(?:каждый\s+)?(?:1\s*)?(?:кг|килограмм\w*)|на\s+килограмм|цена\s+за\s+(?:1\s*)?(?:кг|килограмм\w*)",
+        lowered,
+    ):
         return "кг"
-    if re.search(r"за\s+(?:каждый\s+)?(?:л|литр\w*)|на\s+литр", lowered):
+    if re.search(
+        r"за\s+(?:каждый\s+)?(?:1\s*)?(?:л|литр\w*)|на\s+литр|цена\s+за\s+(?:1\s*)?(?:л|литр\w*)",
+        lowered,
+    ):
         return "л"
     return None
+
+
+def _volume_is_unit_price_probe(text: str, volume: str | None, unit: str | None) -> bool:
+    if not unit or not volume:
+        return False
+    parsed = parse_requested_quantity(volume)
+    if parsed is None or parsed.unit != unit or parsed.amount != 1:
+        return False
+    return _infer_unit_price_request(text) == unit
 
 
 def _is_generic_fallback_reply(reply: str) -> bool:
@@ -723,6 +786,24 @@ def _catalog_has_positions(result: str) -> bool:
     return any("SKU:" in line for line in result.splitlines())
 
 
+def _category_listing_reply(result: str, text: str = "") -> str | None:
+    if not result or _catalog_has_positions(result):
+        return None
+    if "Подтверждённых позиций по запросу" in result:
+        return None
+    if "Доступные категории" not in result:
+        return None
+    if text and not _is_broad_assortment_utterance(text):
+        return None
+    headings = [
+        line.strip()[2:].strip() for line in result.splitlines() if line.strip().startswith("- ")
+    ]
+    prefix = PRODUCT_ASSORTMENT.rstrip()
+    if headings:
+        return f"{prefix} Сейчас в каталоге: {', '.join(headings)}. {PRODUCT_CATEGORY_QUESTION}"
+    return f"{prefix} {PRODUCT_CATEGORY_QUESTION}"
+
+
 def _catalog_no_match_context(result: str | None) -> bool:
     return bool(result and "CATALOG_RESULT_EMPTY" in result and not _catalog_has_positions(result))
 
@@ -932,11 +1013,16 @@ def resolve_catalog_query(
     The second value is the owner: utterance, semantic, sticky, interest, or None.
     Sticky no-match is only recorded for a newly named unknown entity.
     """
+    if _is_broad_assortment_utterance(text):
+        return "", "assortment"
     utterance = _utterance_search_key(text)
     if utterance:
         return utterance, "utterance"
     semantic_product = semantic.product.strip() if semantic and semantic.product else None
-    if semantic_product and _is_referential_followup(semantic_product):
+    if semantic_product and (
+        _is_referential_followup(semantic_product)
+        or _is_broad_assortment_utterance(semantic_product)
+    ):
         semantic_product = None
     if (
         semantic_product
@@ -1333,7 +1419,7 @@ class ConversationService:
         catalog_query, query_owner = resolve_catalog_query(text, semantic, client)
         preliminary_catalog_result = None
         catalog_no_match = False
-        if catalog_query:
+        if catalog_query is not None:
             preliminary_catalog_result = (
                 search(catalog_query, include_competitors=True)
                 if asks_for_competitor(text)
@@ -1408,8 +1494,11 @@ class ConversationService:
             calculated_composite[0] if calculated_composite else _composite_order_catalog(text)
         )
         competitor_request = asks_for_competitor(text)
-        search_key = catalog_query or _utterance_search_key(text)
-        if not search_key:
+        if catalog_query is not None:
+            search_key = catalog_query
+        else:
+            search_key = _utterance_search_key(text)
+        if not search_key and catalog_query is None:
             if _is_anaphoric_followup(text) or _is_volume_only_followup(text):
                 search_key = client.current_interest or client.product
             elif _is_catalog_or_price_question(text):
@@ -1426,7 +1515,7 @@ class ConversationService:
                 if competitor_request
                 else search(search_key)
             )
-            if search_key
+            if search_key is not None
             else None
         )
         unit_quote = None
@@ -1565,7 +1654,7 @@ class ConversationService:
             client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
         )
         if open_turn and _reject_turn(open_turn, catalog_result, client) is None:
-            self._apply_turn_facts(client, open_turn)
+            self._apply_turn_facts(client, open_turn, message.text)
             return await self._finish(client, message.text, BotReply(open_turn.reply.strip()), now)
         deterministic_recovery = _deterministic_recovery_reply(text, catalog_result or "")
         if deterministic_recovery:
@@ -1592,6 +1681,10 @@ class ConversationService:
                 BotReply(_format_line_total_reply(line_quote, client.name)),
                 now,
             )
+
+        listing = _category_listing_reply(catalog_result or "", text)
+        if listing:
+            return await self._finish(client, message.text, BotReply(listing, delay=False), now)
 
         catalog_reply = (
             None
@@ -1726,6 +1819,8 @@ class ConversationService:
             and _may_write_commercial_facts(client)
             and semantic
             and semantic.product
+            and not _is_broad_assortment_utterance(semantic.product)
+            and not _is_broad_assortment_utterance(text)
         ):
             if client.product and client.product != semantic.product:
                 client.original_interests = list(client.original_interests or [client.product])
@@ -1746,6 +1841,11 @@ class ConversationService:
         if _looks_like_packaging_fragment(text) or (
             volume is not None and _looks_like_packaging_fragment(volume)
         ):
+            volume = None
+        unit_request = (
+            semantic.unit_price_request if semantic else None
+        ) or _infer_unit_price_request(text)
+        if _volume_is_unit_price_probe(text, volume, unit_request):
             volume = None
         if allow_catalog_facts and volume and not client.volume:
             client.volume = volume[:300]
@@ -1974,7 +2074,9 @@ class ConversationService:
         catalog_no_match = _catalog_no_match_context(catalog_result)
         turn = await self._safe_respond(client, history, user_message, catalog_result)
         if not catalog_no_match:
-            self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
+            self._apply_turn_facts(
+                client, turn or AiTurn(reply="", needs_human=False), user_message
+            )
         if (
             turn is not None
             and _reject_turn(turn, catalog_result, client) is None
@@ -2021,7 +2123,7 @@ class ConversationService:
             )
             if open_turn and _reject_turn(open_turn, catalog_result, client) is None:
                 if not catalog_no_match:
-                    self._apply_turn_facts(client, open_turn)
+                    self._apply_turn_facts(client, open_turn, user_message)
                 return await self._finish(
                     client,
                     user_message,
@@ -2066,6 +2168,9 @@ class ConversationService:
                     BotReply(_format_line_total_reply(line_quote, client.name), delay=False),
                     now,
                 )
+            listing = _category_listing_reply(catalog_result or "", user_message)
+            if listing:
+                return await self._finish(client, user_message, BotReply(listing, delay=False), now)
             if _catalog_has_positions(catalog_result or ""):
                 recovery = await self._safe_repair(
                     client, history, user_message, "recovery_attempt_2", catalog_result or ""
@@ -2200,8 +2305,8 @@ class ConversationService:
                 client.status = "уточнение объёма"
 
     @staticmethod
-    def _apply_turn_facts(client: ClientProfile, turn: AiTurn) -> None:
-        if turn.product:
+    def _apply_turn_facts(client: ClientProfile, turn: AiTurn, user_message: str = "") -> None:
+        if turn.product and not _is_broad_assortment_utterance(turn.product):
             ConversationService._snapshot_original_topic(client, client.product, turn.product)
             client.current_interest = turn.product[:300]
             client.product = turn.product[:300]
@@ -2209,6 +2314,9 @@ class ConversationService:
             turn.volume
             and looks_like_volume(turn.volume)
             and not _looks_like_packaging_fragment(turn.volume)
+            and not _volume_is_unit_price_probe(
+                user_message, turn.volume, _infer_unit_price_request(user_message)
+            )
         ):
             client.volume = turn.volume[:300]
         if is_qualified(client) and client.status not in {"готов к заказу", "получил предложение"}:

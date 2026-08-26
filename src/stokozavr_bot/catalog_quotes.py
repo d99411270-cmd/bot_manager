@@ -383,6 +383,17 @@ def _whole_count(value: Decimal) -> int | None:
     return count if count >= 1 else None
 
 
+def derived_allowed_amounts(packaging: str, price: str) -> frozenset[str]:
+    """Pack price plus ₽/кг, ₽/л and ₽/шт implied by an unambiguous pack."""
+    spec = parse_packaging(packaging)
+    amount = _price_decimal(price)
+    if spec is None or amount is None:
+        return frozenset()
+    allowed = {_format_amount(amount)}
+    allowed.update(_derived_unit_prices(spec, amount))
+    return frozenset(allowed)
+
+
 def _derived_unit_prices(spec: PackagingSpec, price: Decimal) -> list[str]:
     amounts: list[str] = []
     if spec.content_amount > 0:
