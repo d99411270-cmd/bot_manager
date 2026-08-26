@@ -139,6 +139,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     due, sent, extra = _split_followup(extra)
     price_list_requested, price_list_sent_at, extra = _split_price_list_state(extra)
     catalog_no_match_query, extra = _split_catalog_no_match(extra)
+    original_interests, current_interest, extra = _split_interests(extra)
     return ClientProfile(
         telegram_id=telegram_id,
         username=_text(row.get("username")),
@@ -157,6 +158,8 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         contact_skipped=skipped,
         followup_due_at=due,
         followup_sent=sent,
+        original_interests=original_interests,
+        current_interest=current_interest,
         needs_human="Нужен менеджер" in extra,
         price_list_requested=price_list_requested,
         price_list_sent_at=price_list_sent_at,
@@ -240,6 +243,22 @@ def _split_catalog_no_match(extra: str) -> tuple[str | None, str]:
     return query, " | ".join(kept)
 
 
+def _split_interests(extra: str) -> tuple[list[str] | None, str | None, str]:
+    original: list[str] | None = None
+    current: str | None = None
+    kept: list[str] = []
+    for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        if part.startswith("Исходный интерес: "):
+            raw = part.removeprefix("Исходный интерес: ")
+            values = [item.strip() for item in raw.split(",") if item.strip()]
+            original = values or None
+        elif part.startswith("Текущий интерес: "):
+            current = part.removeprefix("Текущий интерес: ").strip() or None
+        else:
+            kept.append(part)
+    return original, current, " | ".join(kept)
+
+
 def _build_comment(client: ClientProfile) -> str:
     parts: list[str] = []
     if client.volume:
@@ -270,6 +289,7 @@ def _build_comment(client: ClientProfile) -> str:
     extra = _split_followup(_parse_comment(client.comment or "")[5])[2]
     extra = _split_price_list_state(extra)[2]
     extra = _split_catalog_no_match(extra)[1]
+    extra = _split_interests(extra)[2]
     if client.last_name:
         parts.append(f"Фамилия: {client.last_name}")
     if client.budget is not None:

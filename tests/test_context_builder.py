@@ -101,3 +101,17 @@ def test_context_uses_only_provided_history_not_full_table():
     assert [row["user"] for row in ctx["recent_history"]] == ["u1", "u2"]
     assert ctx["deal_stage"] == "discovery"
     assert ctx["missing_fields"] == ["phone", "product", "volume"]
+
+
+def test_interests_list_preserves_original_and_current():
+    profile = ClientProfile(
+        telegram_id=3,
+        product="сок",
+        original_interests=["творожки"],
+        current_interest="сок",
+    )
+    ctx = build_model_context(profile, [])
+
+    assert ctx["interests"] == ["творожки", "сок"]
+    assert ctx["profile"]["original_interests"] == ["творожки"]
+    assert ctx["profile"]["current_interest"] == "сок"

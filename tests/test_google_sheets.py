@@ -187,6 +187,31 @@ async def test_google_sheets_persists_catalog_no_match_query_without_product():
 
 
 @pytest.mark.asyncio
+async def test_google_sheets_roundtrips_original_and_current_interest():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 26, 12, tzinfo=timezone.utc)
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=72,
+            name="Анна",
+            product="сок",
+            original_interests=["творожки"],
+            current_interest="сок",
+            first_contact_at=now,
+            last_contact_at=now,
+        )
+    )
+    loaded = await repo.get_client(72)
+
+    assert loaded.original_interests == ["творожки"]
+    assert loaded.current_interest == "сок"
+    comment = book.sheets["Клиенты"].rows[1][-1]
+    assert "Исходный интерес: творожки" in comment
+    assert "Текущий интерес: сок" in comment
+
+
+@pytest.mark.asyncio
 async def test_google_sheets_repository_appends_and_limits_history():
     book = FakeBook()
     repo = GoogleSheetsCRMRepository(book)

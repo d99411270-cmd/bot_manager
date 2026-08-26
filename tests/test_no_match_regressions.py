@@ -253,6 +253,107 @@ async def test_no_match_rejects_ai_alternatives_and_uses_deterministic_reply():
     assert "похож" not in result.text.lower()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "intent", "product", "expected_sku"),
+    [
+        ("тогда макароны", "provide_data", None, "PASTA-HORNS-001"),
+        ("тогда макароны", "question", None, "PASTA-SPAGHETTI-001"),
+        ("тогда макароны", "offtopic", None, "PASTA-HORNS-001"),
+        ("нужен рис", "provide_data", None, "GRC-RICE-001"),
+        ("масло подсолнечное есть?", "question", None, "OIL-SUNFLOWER-001"),
+    ],
+)
+async def test_new_category_after_unknown_clears_sticky_and_searches_utterance(
+    message, intent, product, expected_sku
+):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=7,
+            name="Энрике",
+            phone="+799****0007",
+            status="уточнение продукта",
+            catalog_no_match_query=UNKNOWN_PRODUCT,
+        )
+    )
+    ai = NoMatchAI(
+        analyses=[IntakeAnalysis(intent=intent, product=product)],
+        replies=[AiTurn(reply="В каталоге есть подходящие позиции.")],
+    )
+
+    result = await ConversationService(repo, ai, clock=lambda: NOW).handle(
+        IncomingMessage(7, None, message)
+    )
+    saved = await repo.get_client(7)
+
+    assert result.text != CATALOG_NO_MATCH_REPLY
+    assert "нет в каталоге" not in result.text.lower()
+    assert saved.catalog_no_match_query is None
+    assert ai.catalog_calls
+    catalog = "\n".join(ai.catalog_calls)
+    assert expected_sku in catalog
+    assert UNKNOWN_PRODUCT not in catalog
+
+
+@pytest.mark.asyncio
+async def test_new_assortment_question_overrides_sticky_even_if_intake_omits_product():
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=8,
+            name="Энрике",
+            phone="+799****0008",
+            status="уточнение продукта",
+            catalog_no_match_query=UNKNOWN_PRODUCT,
+        )
+    )
+    ai = NoMatchAI(
+        analyses=[IntakeAnalysis(intent="question", product=None)],
+        replies=[AiTurn(reply="В каталоге есть овощи.")],
+    )
+
+    result = await ConversationService(repo, ai, clock=lambda: NOW).handle(
+        IncomingMessage(8, None, "а какие овощи есть?")
+    )
+    saved = await repo.get_client(8)
+
+    assert result.text != CATALOG_NO_MATCH_REPLY
+    assert saved.catalog_no_match_query is None
+    assert ai.catalog_calls
+    catalog = "\n".join(ai.catalog_calls)
+    assert "VEG-POTATO-001" in catalog
+    assert UNKNOWN_PRODUCT not in catalog
+
+
+@pytest.mark.asyncio
+async def test_valid_product_not_saved_together_with_no_match_reply():
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=9,
+            name="Энрике",
+            phone="+799****0009",
+            status="уточнение продукта",
+            catalog_no_match_query=UNKNOWN_PRODUCT,
+        )
+    )
+    ai = NoMatchAI(
+        analyses=[IntakeAnalysis(intent="provide_data", product="макароны")],
+        replies=[AiTurn(reply="Зафиксировал макароны.")],
+    )
+
+    result = await ConversationService(repo, ai, clock=lambda: NOW).handle(
+        IncomingMessage(9, None, "тогда макароны")
+    )
+    saved = await repo.get_client(9)
+
+    assert not (saved.product == "макароны" and CATALOG_NO_MATCH_REPLY in (result.text or ""))
+    assert result.text != CATALOG_NO_MATCH_REPLY
+    assert saved.catalog_no_match_query is None
+    assert "нет в каталоге" not in result.text.lower()
+
+
 @pytest.mark.parametrize(
     "reply",
     [

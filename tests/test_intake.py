@@ -70,6 +70,42 @@ async def test_question_why_name_gets_benefit_and_repeats_name_question(now):
     assert "как я могу к вам обращаться" in result.text.lower()
     assert result.text.count("?") == 1
     assert (await repo.get_client(2)).name is None
+    assert (await repo.get_client(2)).last_name is None
+
+
+@pytest.mark.asyncio
+async def test_question_why_name_short_phrase_does_not_write_last_name(now):
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI([analysis("question", reply="Имя нужно, чтобы обращаться к вам лично.")])
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(201, None, "зачем имя"))
+    saved = await repo.get_client(201)
+
+    assert saved.name is None
+    assert saved.last_name is None
+    assert "номер телефона" not in result.text.lower()
+    assert "очень приятно" not in result.text.lower()
+    assert saved.status == "новый"
+
+
+@pytest.mark.asyncio
+async def test_product_and_volume_persist_without_contact(now):
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI(
+        [analysis("provide_data", product="макароны", volume="20 коробок")],
+        [AiTurn(reply="Зафиксировал макароны, 20 коробок.")],
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    await service.handle(IncomingMessage(202, None, "Макароны, 20 коробок"))
+    saved = await repo.get_client(202)
+
+    assert saved.name is None
+    assert saved.phone is None
+    assert saved.contact_skipped is False
+    assert saved.product == "макароны"
+    assert saved.volume == "20 коробок"
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from stokozavr_bot.models import IncomingMessage, IntakeAnalysis
+from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.repositories import InMemoryCRMRepository
-from stokozavr_bot.service import ConversationService, parse_person_name
+from stokozavr_bot.service import PHONE_QUESTION, ConversationService, parse_person_name
 
 
 @pytest.fixture
@@ -13,8 +13,10 @@ def now():
 
 
 class SemanticAI:
-    def __init__(self, analyses=()):
+    def __init__(self, analyses=(), turns=()):
         self.analyses = list(analyses)
+        self.turns = list(turns)
+        self.catalog_calls = []
 
     async def analyze_intake(self, profile, history, message):
         if self.analyses:
@@ -22,6 +24,14 @@ class SemanticAI:
         return IntakeAnalysis(intent="provide_data")
 
     async def respond(self, profile, history, message):
+        if self.turns:
+            return self.turns.pop(0)
+        raise RuntimeError("no respond")
+
+    async def respond_with_catalog(self, profile, history, message, catalog_result):
+        self.catalog_calls.append(catalog_result)
+        if self.turns:
+            return self.turns.pop(0)
         raise RuntimeError("no respond")
 
 
@@ -44,3 +54,117 @@ async def test_bot_addresses_first_name_and_keeps_last_name(now):
     assert saved.last_name == "Иванов"
     assert "Сергей" in result.text
     assert "Иванов" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_short_greeting_priv_then_full_name_keeps_sergey_ivanov(now):
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI(
+        [
+            IntakeAnalysis(intent="greeting"),
+            IntakeAnalysis(intent="provide_data", name="Сергей Иванов"),
+        ]
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    greeting = await service.handle(IncomingMessage(2, None, "Прив"))
+    after_greeting = await repo.get_client(2)
+    named = await service.handle(IncomingMessage(2, None, "Сергей Иванов"))
+    saved = await repo.get_client(2)
+
+    assert after_greeting.name is None
+    assert after_greeting.last_name is None
+    assert "очень приятно" not in greeting.text.lower()
+    assert saved.name == "Сергей"
+    assert saved.last_name == "Иванов"
+    assert "Сергей" in named.text
+    assert "Иванов" not in named.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_token_is_not_a_name_even_if_parse_person_name_would_accept(now):
+    assert parse_person_name("яблоки") == ("Яблоки", None)
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data")],
+        [AiTurn(reply="Яблоки сезонные есть, фасовка короб 10 кг.")],
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(3, None, "яблоки"))
+    saved = await repo.get_client(3)
+
+    assert saved.name is None
+    assert saved.last_name is None
+    assert "очень приятно" not in result.text.lower()
+    assert PHONE_QUESTION not in result.text
+    assert "яблок" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_catalog_token_in_product_stage_does_not_overwrite_name(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=4, name="Настя", status="уточнение продукта"))
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data")],
+        [AiTurn(reply="Яблоки сезонные есть, фасовка короб 10 кг.")],
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(4, None, "яблоки"))
+    saved = await repo.get_client(4)
+
+    assert saved.name == "Настя"
+    assert saved.last_name is None
+    assert "очень приятно" not in result.text.lower()
+    assert PHONE_QUESTION not in result.text
+
+
+@pytest.mark.asyncio
+async def test_ready_to_buy_phrase_does_not_become_name_or_last_name(now):
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI(
+        [IntakeAnalysis(intent="provide_data")],
+        [AiTurn(reply="Чтобы оформить заказ, нужен номер телефона.")],
+    )
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    await service.handle(IncomingMessage(5, None, "всё беру"))
+    saved = await repo.get_client(5)
+
+    assert saved.name is None
+    assert saved.last_name is None
+
+
+@pytest.mark.asyncio
+async def test_ready_to_buy_does_not_write_last_name_when_name_already_set(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=6, name="Игорь", status="ожидает телефон"))
+    service = ConversationService(
+        repo,
+        SemanticAI([IntakeAnalysis(intent="provide_data")]),
+        clock=lambda: now,
+    )
+
+    await service.handle(IncomingMessage(6, None, "всё беру"))
+    saved = await repo.get_client(6)
+
+    assert saved.name == "Игорь"
+    assert saved.last_name is None
+
+
+@pytest.mark.asyncio
+async def test_name_correction_replaces_first_name(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(telegram_id=7, name="Яблоки", status="ожидает телефон"))
+    service = ConversationService(
+        repo,
+        SemanticAI([IntakeAnalysis(intent="correction", name="Настя")]),
+        clock=lambda: now,
+    )
+
+    await service.handle(IncomingMessage(7, None, "меня Настя зовут, не Яблоки"))
+    saved = await repo.get_client(7)
+
+    assert saved.name == "Настя"
+    assert saved.last_name is None

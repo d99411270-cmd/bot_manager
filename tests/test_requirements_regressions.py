@@ -284,6 +284,82 @@ async def test_unknown_manufacturer_creates_explicit_handoff_state(now):
 
 
 @pytest.mark.asyncio
+async def test_unit_price_uses_utterance_or_target_product_not_stale_sku(now):
+    class UnitPriceAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="рис длиннозёрный: 85 ₽/кг")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="question", unit_price_request="кг", target_product=None)
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=910,
+            name="Олег",
+            phone="+799****0910",
+            product="бакалея",
+            current_interest="сахар белый",
+            volume="40 упаковок",
+            status="квалифицирован",
+        )
+    )
+    ai = UnitPriceAI()
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(910, None, "рис за кг")
+    )
+
+    assert "85 ₽/кг" in result.text
+    assert "62" not in result.text
+    assert ai.catalog_calls
+    assert "GRC-RICE-001" in ai.catalog_calls[0]
+    assert "GRC-SUGAR-001" not in ai.catalog_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_explicit_switch_phrase_searches_new_topic(now):
+    class SwitchAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="По соку есть яблочный.")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="provide_data", product=None)
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=911,
+            name="Игорь",
+            phone="+799****0911",
+            product="овощи и макароны",
+            current_interest="овощи и макароны",
+            volume="100 кг",
+            status="квалифицирован",
+        )
+    )
+    ai = SwitchAI()
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(911, None, "теперь интересует сок")
+    )
+
+    assert ai.catalog_calls
+    catalog = ai.catalog_calls[0]
+    assert "SOK-APPLE-001" in catalog
+    assert "VEG-POTATO-001" not in catalog
+    assert "сок" in result.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_switching_interest_keeps_original_interest(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(
@@ -308,6 +384,86 @@ async def test_switching_interest_keeps_original_interest(now):
     assert saved.product == "сок"
     assert saved.current_interest == "сок"
     assert saved.original_interests == ["творожки"]
+
+
+@pytest.mark.asyncio
+async def test_item_choice_does_not_store_parent_category_as_product(now):
+    class ItemAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="Яблоки сезонные есть в каталоге.")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="question", product="яблоки")
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=912,
+            name="Анна",
+            phone="+799****0912",
+            current_interest="фрукты",
+            status="уточнение продукта",
+        )
+    )
+    ai = ItemAI()
+    await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(912, None, "яблоки")
+    )
+    saved = await repo.get_client(912)
+
+    assert saved.current_interest
+    assert "яблок" in saved.current_interest.lower()
+    assert saved.current_interest.lower() != "фрукты"
+    assert saved.product is None or "яблок" in saved.product.lower()
+    assert saved.product != "фрукты"
+    assert ai.catalog_calls
+    assert "FRU-APPLE-001" in ai.catalog_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_switch_keeps_original_without_fake_ai_product_field(now):
+    class SwitchAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="По соку есть яблочный.")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="provide_data", product=None)
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=913,
+            name="Игорь",
+            phone="+799****0913",
+            product="картофель",
+            current_interest="картофель",
+            volume="100 кг",
+            status="квалифицирован",
+        )
+    )
+    ai = SwitchAI()
+    await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(913, None, "теперь интересует сок")
+    )
+    saved = await repo.get_client(913)
+
+    assert saved.original_interests == ["картофель"]
+    assert saved.current_interest
+    assert "сок" in saved.current_interest.lower()
+    assert saved.current_interest.lower() not in {"напитки", "овощи"}
+    assert "картофель" not in (saved.current_interest or "").lower()
+    assert ai.catalog_calls
+    assert "SOK-APPLE-001" in ai.catalog_calls[0]
 
 
 def test_catalog_requires_structured_verified_record_before_commercial_facts():

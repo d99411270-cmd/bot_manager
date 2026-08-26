@@ -441,6 +441,42 @@ async def test_price_followup_reuses_previous_vegetable_and_fruit_interest(now):
     assert set(saved.current_interest.split(" и ")) == {"овощи", "фрукты"}
 
 
+@pytest.mark.asyncio
+async def test_new_category_question_does_not_reuse_previous_interest(now):
+    class ContextAI(FakeAI):
+        def __init__(self):
+            super().__init__([AiTurn(reply="В каталоге есть картофель, морковь и лук.")])
+            self.catalog_calls = []
+
+        async def analyze_intake(self, profile, history, message):
+            return IntakeAnalysis(intent="question")
+
+        async def respond_with_catalog(self, profile, history, message, catalog_result):
+            self.catalog_calls.append(catalog_result)
+            return self.turns.pop(0)
+
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=69,
+            name="Настя",
+            status="уточнение продукта",
+            current_interest="фрукты",
+        )
+    )
+    ai = ContextAI()
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(69, None, "а овощи?"))
+
+    assert ai.catalog_calls
+    catalog = ai.catalog_calls[0]
+    assert "VEG-POTATO-001" in catalog
+    assert "картофель" in result.text.lower() or "овощ" in result.text.lower()
+    fruit_only = "FRU-APPLE-001" in catalog and "VEG-POTATO-001" not in catalog
+    assert not fruit_only
+
+
 async def test_ai_gets_profile_and_recent_history_only(now):
     repo = InMemoryCRMRepository()
     await repo.save_client(

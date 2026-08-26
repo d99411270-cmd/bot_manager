@@ -11,9 +11,12 @@ from .followup import FOLLOWUP_DELAY, apply_followup_rules, reply_quoted_price
 from .models import AiTurn, BotReply, ClientProfile, HistoryEntry, IncomingMessage, IntakeAnalysis
 from .product_catalog import (
     UnitPriceQuote,
+    catalog_categories_in_result,
     generated_price_list,
+    grounded_quote_reply,
     grounded_search_reply,
     infer_catalog_interest,
+    named_catalog_item,
     recover_product_from_history,
     search,
     unit_price_catalog_result,
@@ -112,6 +115,17 @@ def looks_like_refusal(text: str) -> bool:
 
 def has_contact(client: ClientProfile) -> bool:
     return bool(client.phone or client.email or client.contact_skipped)
+
+
+def requested_identity_slot(client: ClientProfile) -> str | None:
+    """Return the identity field currently requested, if any."""
+    if not client.name:
+        return "name"
+    if has_contact(client):
+        return None
+    if client.status == "ожидает почту":
+        return "email"
+    return "phone"
 
 
 def waiting_email(client: ClientProfile) -> bool:
@@ -399,6 +413,20 @@ def extract_volume(text: str) -> str | None:
     return text[match.start() : match.end()].strip()
 
 
+def _looks_like_packaging_fragment(text: str) -> bool:
+    compact = (text or "").lower().replace("×", "x").replace("х", "x").replace("*", "x")
+    return bool(re.search(r"\d+\s*x\s*\d+\s*(?:г|гр|грамм|кг|мл|л)", compact))
+
+
+def _reply_reasks_volume(reply: str) -> bool:
+    return bool(
+        re.search(
+            r"какой объём|какой объем|объём продукции вам необходим|какой объем продукции",
+            (reply or "").lower(),
+        )
+    )
+
+
 _NAME_STOP = {
     "огурцы",
     "овощи",
@@ -447,6 +475,25 @@ def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
     return first, last
 
 
+def _is_person_name_value(text: str) -> bool:
+    """A name slot accepts a person name, not a greeting, order, volume, or catalog item."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if looks_like_ready_to_buy(stripped) or looks_like_refusal(stripped):
+        return False
+    if extract_volume(stripped) or _is_catalog_or_price_question(stripped):
+        return False
+    if phone_digit_attempt(stripped) or normalize_phone(stripped):
+        return False
+    return not _catalog_has_positions(search(stripped))
+
+
+def _may_write_commercial_facts(client: ClientProfile) -> bool:
+    """Product/volume may persist without contact, but must not skip a live phone/email slot."""
+    return requested_identity_slot(client) not in {"phone", "email"}
+
+
 def is_valid_ai_reply(text: str, catalog_result: str | None = None) -> bool:
     stripped = text.strip()
     return (
@@ -481,6 +528,43 @@ def _ai_rejection_reason(turn: AiTurn | None, catalog_result: str | None = None)
         return "unsafe_reply" if is_unsafe_claim(turn.reply, catalog_result) else "invalid_reply"
     if not is_valid_ai_reply(turn.reply, catalog_result):
         return "invalid_reply"
+    return None
+
+
+def _reject_turn(
+    turn: AiTurn | None,
+    catalog_result: str | None,
+    client: ClientProfile,
+) -> str | None:
+    reason = _ai_rejection_reason(turn, catalog_result)
+    if reason or turn is None:
+        return reason
+    if client.volume and _reply_reasks_volume(turn.reply):
+        claimed = re.findall(r"(\d[\d\s]*)\s*(?:₽|руб)", turn.reply.lower())
+        if not claimed or not _catalog_has_positions(catalog_result or ""):
+            return "invalid_reply"
+    if (
+        client.volume
+        and _catalog_has_positions(catalog_result or "")
+        and "не могу подтвердить" in turn.reply.lower()
+    ):
+        return "invalid_reply"
+    return None
+
+
+def _volume_grounded_reply(
+    client: ClientProfile,
+    catalog_result: str,
+    previous_reply: str | None = None,
+) -> str | None:
+    if not client.volume:
+        return None
+    topic = client.current_interest or client.product or ""
+    quote = grounded_quote_reply(topic, client.name, client.volume, previous_reply)
+    if quote:
+        return quote
+    if _catalog_has_positions(catalog_result):
+        return grounded_search_reply(catalog_result, client.name, previous_reply)
     return None
 
 
@@ -582,6 +666,88 @@ def _intake_exception_product_query(client: ClientProfile, text: str) -> str | N
     ):
         return None
     return text.strip()
+
+
+def _utterance_names_catalog_topic(text: str, result: str) -> bool:
+    """True when the phrase names a category or item, not a packaging/price fragment."""
+    lowered = text.lower()
+    for line in result.splitlines():
+        if "SKU:" not in line:
+            continue
+        category = re.search(r"Категория:\s*([^;]+)", line)
+        subcategory = re.search(r"Подкатегория:\s*([^;]+)", line)
+        for value in (
+            category.group(1) if category else "",
+            subcategory.group(1) if subcategory else "",
+        ):
+            if any(token in lowered for token in re.findall(r"[а-яёa-z0-9-]{3,}", value.lower())):
+                return True
+    return False
+
+
+def _utterance_search_key(text: str) -> str | None:
+    """Return the current phrase when it names catalog positions — not a denylist of SKUs."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    normalized = re.sub(r"[^а-яёa-z0-9]+", " ", cleaned.lower()).strip().replace("ё", "е")
+    if normalized in _NON_PRODUCT_INTAKE_PHRASES:
+        return None
+    result = search(cleaned)
+    if _catalog_has_positions(result) and _utterance_names_catalog_topic(cleaned, result):
+        return cleaned
+    return None
+
+
+def _is_volume_only_followup(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned or not looks_like_volume(cleaned):
+        return False
+    if _is_catalog_or_price_question(cleaned):
+        return False
+    return _utterance_search_key(cleaned) is None
+
+
+def _is_anaphoric_followup(text: str) -> bool:
+    """Price/availability/packaging follow-up that does not name a new catalog topic."""
+    cleaned = (text or "").strip()
+    if not cleaned or _utterance_search_key(cleaned):
+        return False
+    if asks_for_unverified_info(cleaned) or asks_about_pending_update(cleaned):
+        return True
+    return bool(re.search(r"\bфасовк\w*|\bупаковк\w*", cleaned.lower()))
+
+
+def resolve_catalog_query(
+    text: str,
+    semantic: IntakeAnalysis | None,
+    client: ClientProfile,
+) -> tuple[str | None, str | None]:
+    """Choose the catalog search key: current utterance > same-entity sticky > interest.
+
+    The second value is the owner: utterance, semantic, sticky, interest, or None.
+    Sticky no-match is only recorded for a newly named unknown entity.
+    """
+    utterance = _utterance_search_key(text)
+    if utterance:
+        return utterance, "utterance"
+    semantic_product = semantic.product.strip() if semantic and semantic.product else None
+    if semantic_product and requested_identity_slot(client) not in {"phone", "email"}:
+        return semantic_product, "semantic"
+    if _is_volume_only_followup(text):
+        sticky = client.catalog_no_match_query or client.current_interest or client.product
+        return (sticky, "sticky") if sticky else (None, None)
+    if _is_anaphoric_followup(text):
+        topic = client.current_interest or client.product
+        return topic, "interest" if topic else None
+    if client.catalog_no_match_query:
+        if _is_non_product_intake_text(text) or not text.strip():
+            return None, None
+        return text.strip(), "utterance"
+    if semantic is None:
+        exception_query = _intake_exception_product_query(client, text)
+        return exception_query, "semantic" if exception_query else None
+    return None, None
 
 
 def _repair_reply_is_grounded(reply: str, catalog_result: str) -> bool:
@@ -699,7 +865,13 @@ class ConversationService:
                     now,
                     add_price_list_offer=False,
                 )
-        if client.name and not client.phone and landline and not message.contact_phone:
+        if (
+            requested_identity_slot(client) == "phone"
+            and phone_attempt
+            and landline
+            and not message.contact_phone
+            and not looks_like_volume(text)
+        ):
             client.landline = landline
             client.phone_correction_pending = True
             client.status = "ожидает телефон"
@@ -823,17 +995,9 @@ class ConversationService:
                 BotReply(f"Кажется, {wording}. Пришлите, пожалуйста, номер ещё раз."),
                 now,
             )
-        catalog_query = None
+        catalog_query, query_owner = resolve_catalog_query(text, semantic, client)
         preliminary_catalog_result = None
         catalog_no_match = False
-        if semantic and semantic.product and has_contact(client):
-            catalog_query = semantic.product.strip()
-        elif client.catalog_no_match_query:
-            catalog_query = client.catalog_no_match_query
-        elif looks_like_volume(text) and (client.current_interest or client.product):
-            catalog_query = client.current_interest or client.product
-        elif semantic is None:
-            catalog_query = _intake_exception_product_query(client, text)
         if catalog_query:
             preliminary_catalog_result = (
                 search(catalog_query, include_competitors=True)
@@ -841,9 +1005,12 @@ class ConversationService:
                 else search(catalog_query)
             )
             if not _catalog_has_positions(preliminary_catalog_result):
-                preliminary_catalog_result = _mark_catalog_result_empty(preliminary_catalog_result)
-                catalog_no_match = True
-                _remember_catalog_no_match(client, catalog_query)
+                if query_owner in {"utterance", "semantic", "sticky"}:
+                    preliminary_catalog_result = _mark_catalog_result_empty(
+                        preliminary_catalog_result
+                    )
+                    catalog_no_match = True
+                    _remember_catalog_no_match(client, catalog_query)
             elif client.catalog_no_match_query:
                 _clear_catalog_no_match(client)
 
@@ -902,24 +1069,25 @@ class ConversationService:
 
         composite_catalog = _composite_order_catalog(text)
         competitor_request = asks_for_competitor(text)
+        search_key = catalog_query or _utterance_search_key(text)
+        if not search_key:
+            if _is_anaphoric_followup(text) or _is_volume_only_followup(text):
+                search_key = client.current_interest or client.product
+            elif _is_catalog_or_price_question(text):
+                search_key = client.current_interest or client.product or text
+            elif client.current_interest or client.product:
+                search_key = client.current_interest or client.product
         catalog_result = (
             composite_catalog
             if composite_catalog
             else preliminary_catalog_result
             if preliminary_catalog_result is not None
             else (
-                search(
-                    client.current_interest or client.product or text,
-                    include_competitors=True,
-                )
+                search(search_key, include_competitors=True)
                 if competitor_request
-                else search(client.current_interest or client.product or text)
+                else search(search_key)
             )
-            if client.current_interest or client.product
-            else search(text, include_competitors=True)
-            if competitor_request
-            else search(text)
-            if _is_catalog_or_price_question(text)
+            if search_key
             else None
         )
         unit_quote = None
@@ -927,15 +1095,17 @@ class ConversationService:
             semantic.unit_price_request if semantic else None
         ) or _infer_unit_price_request(text)
         if requested_unit:
+            utterance_target = _utterance_search_key(text)
             target = (
                 (semantic.target_product if semantic else None)
                 or (semantic.product if semantic else None)
-                or client.current_interest
-                or client.product
+                or utterance_target
+                or catalog_query
             )
             if not target or (
-                target == client.product
+                target in {client.product, client.current_interest}
                 and not (semantic and (semantic.target_product or semantic.product))
+                and not utterance_target
             ):
                 recovered = recover_product_from_history(
                     "\n".join(f"{row.user_message}\n{row.assistant_message}" for row in history),
@@ -943,13 +1113,13 @@ class ConversationService:
                 )
                 if recovered:
                     target = recovered
+            if not target:
+                target = client.current_interest or client.product
             if target:
-                client.current_interest = target[:300]
-                if has_contact(client):
-                    client.product = target[:300]
                 calculated = unit_price_catalog_result(target, requested_unit)
                 if calculated:
                     catalog_result, unit_quote = calculated
+                    client.current_interest = unit_quote.record.subcategory[:300]
 
         catalog_empty_check = bool(
             client.product
@@ -1000,11 +1170,11 @@ class ConversationService:
             )
 
         turn = await self._safe_respond(client, history, message.text, catalog_result)
-        rejection_reason = _ai_rejection_reason(turn, catalog_result)
+        rejection_reason = _reject_turn(turn, catalog_result, client)
         if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
             rejection_reason = "invalid_reply"
         if rejection_reason is None and turn is not None:
-            self._remember_catalog_interest(client, catalog_result, turn.reply)
+            self._remember_catalog_interest(client, catalog_result, turn.reply, message.text)
             return await self._finish(client, message.text, BotReply(turn.reply.strip()), now)
         logger.warning(
             "Rejected AI reply for telegram_id=%s reason=%s needs_human=%s",
@@ -1015,7 +1185,7 @@ class ConversationService:
         repair = await self._safe_repair(
             client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
         )
-        repair_reason = _ai_rejection_reason(repair, catalog_result)
+        repair_reason = _reject_turn(repair, catalog_result, client)
         if (
             repair_reason is None
             and repair is not None
@@ -1032,7 +1202,7 @@ class ConversationService:
         open_turn = await self._safe_open_dialog(
             client, history, message.text, rejection_reason or "invalid_reply", catalog_result or ""
         )
-        if open_turn and _ai_rejection_reason(open_turn, catalog_result) is None:
+        if open_turn and _reject_turn(open_turn, catalog_result, client) is None:
             self._apply_turn_facts(client, open_turn)
             return await self._finish(client, message.text, BotReply(open_turn.reply.strip()), now)
         deterministic_recovery = _deterministic_recovery_reply(text, catalog_result or "")
@@ -1142,13 +1312,19 @@ class ConversationService:
         allow_catalog_facts: bool = True,
     ) -> bool:
         captured = False
-        parsed = parse_person_name(text)
-        can_read_semantic = bool(
-            semantic and (semantic.intent in _CAPTURE_INTENTS or semantic.intent == "question")
-        )
-        if not parsed and can_read_semantic:
-            parsed = parse_person_name(semantic.name)
-        if parsed and (not client.name or (can_read_semantic and semantic.intent == "correction")):
+        intent = semantic.intent if semantic else None
+        parsed = None
+        if intent in _CAPTURE_INTENTS:
+            name_source = semantic.name if semantic and semantic.name else None
+            if name_source:
+                parsed = parse_person_name(name_source)
+            elif requested_identity_slot(client) == "name":
+                parsed = parse_person_name(text)
+            candidate = name_source or text
+            if parsed and not _is_person_name_value(candidate):
+                parsed = None
+        can_read_semantic = bool(semantic and (intent in _CAPTURE_INTENTS or intent == "question"))
+        if parsed and (not client.name or intent == "correction"):
             client.name, last = parsed
             if last:
                 client.last_name = last
@@ -1168,13 +1344,20 @@ class ConversationService:
                     client.email = email
                     client.status = "уточнение продукта"
                     captured = True
-            if allow_catalog_facts and has_contact(client) and semantic and semantic.product:
-                if client.product and client.product != semantic.product:
-                    client.original_interests = list(client.original_interests or [client.product])
-                client.current_interest = semantic.product[:300]
-                client.product = semantic.product[:300]
+        if (
+            allow_catalog_facts
+            and can_read_semantic
+            and _may_write_commercial_facts(client)
+            and semantic
+            and semantic.product
+        ):
+            if client.product and client.product != semantic.product:
+                client.original_interests = list(client.original_interests or [client.product])
+            client.current_interest = semantic.product[:300]
+            client.product = semantic.product[:300]
+            if client.name:
                 client.status = "уточнение объёма"
-                captured = True
+            captured = True
         volume = extract_volume(text)
         if (
             not volume
@@ -1183,7 +1366,15 @@ class ConversationService:
             and looks_like_volume(semantic.volume)
         ):
             volume = semantic.volume.strip()[:300]
-        if allow_catalog_facts and volume and client.product:
+        if _looks_like_packaging_fragment(text):
+            volume = None
+        if (
+            allow_catalog_facts
+            and volume
+            and not client.volume
+            and client.product
+            and _may_write_commercial_facts(client)
+        ):
             client.volume = volume[:300]
             captured = True
             if has_contact(client):
@@ -1214,6 +1405,8 @@ class ConversationService:
 
     @staticmethod
     def _next_question_after_capture(client: ClientProfile) -> str:
+        if not client.name:
+            return NAME_QUESTION
         if not has_contact(client):
             if client.status == "ожидает почту":
                 return EMAIL_QUESTION
@@ -1332,11 +1525,11 @@ class ConversationService:
             self._apply_turn_facts(client, turn or AiTurn(reply="", needs_human=False))
         if (
             turn is not None
-            and _ai_rejection_reason(turn, catalog_result) is None
+            and _reject_turn(turn, catalog_result, client) is None
             and not catalog_no_match
         ):
-            self._remember_catalog_interest(client, catalog_result, turn.reply)
-        rejection_reason = _ai_rejection_reason(turn, catalog_result)
+            self._remember_catalog_interest(client, catalog_result, turn.reply, user_message)
+        rejection_reason = _reject_turn(turn, catalog_result, client)
         if unit_quote and turn and _is_generic_fallback_reply(turn.reply):
             rejection_reason = "invalid_reply"
         if rejection_reason is not None:
@@ -1351,7 +1544,7 @@ class ConversationService:
             repair = await self._safe_repair(
                 client, history, user_message, rejection_reason, catalog_result or ""
             )
-            repair_reason = _ai_rejection_reason(repair, catalog_result)
+            repair_reason = _reject_turn(repair, catalog_result, client)
             if (
                 repair_reason is None
                 and repair is not None
@@ -1374,7 +1567,7 @@ class ConversationService:
             open_turn = await self._safe_open_dialog(
                 client, history, user_message, rejection_reason, catalog_result or ""
             )
-            if open_turn and _ai_rejection_reason(open_turn, catalog_result) is None:
+            if open_turn and _reject_turn(open_turn, catalog_result, client) is None:
                 if not catalog_no_match:
                     self._apply_turn_facts(client, open_turn)
                 return await self._finish(
@@ -1413,7 +1606,7 @@ class ConversationService:
                 )
                 if (
                     recovery
-                    and _ai_rejection_reason(recovery, catalog_result) is None
+                    and _reject_turn(recovery, catalog_result, client) is None
                     and _repair_reply_is_grounded(recovery.reply, catalog_result or "")
                 ):
                     return await self._finish(
@@ -1441,6 +1634,16 @@ class ConversationService:
                             client, user_message, BotReply(catalog_reply, delay=False), now
                         )
                 if not callable(getattr(self.ai, "repair_response", None)):
+                    if rejection_reason == "invalid_reply":
+                        quote = _volume_grounded_reply(
+                            client,
+                            catalog_result or "",
+                            history[-1].assistant_message if history else None,
+                        )
+                        if quote:
+                            return await self._finish(
+                                client, user_message, BotReply(quote, delay=False), now
+                            )
                     return await self._finish(
                         client,
                         user_message,
@@ -1449,6 +1652,16 @@ class ConversationService:
                         ),
                         now,
                     )
+                if rejection_reason == "invalid_reply":
+                    quote = _volume_grounded_reply(
+                        client,
+                        catalog_result or "",
+                        history[-1].assistant_message if history else None,
+                    )
+                    if quote:
+                        return await self._finish(
+                            client, user_message, BotReply(quote, delay=False), now
+                        )
                 return await self._finish(
                     client,
                     user_message,
@@ -1477,18 +1690,45 @@ class ConversationService:
         )
 
     @staticmethod
+    def _snapshot_original_topic(
+        client: ClientProfile, previous: str | None, incoming: str
+    ) -> None:
+        if not previous or previous == incoming:
+            return
+        originals = list(client.original_interests or [])
+        if previous not in originals:
+            originals.append(previous)
+        if client.product and client.product != incoming and client.product not in originals:
+            originals.append(client.product)
+        client.original_interests = originals
+
+    @staticmethod
     def _remember_catalog_interest(
-        client: ClientProfile, catalog_result: str | None, reply: str
+        client: ClientProfile,
+        catalog_result: str | None,
+        reply: str,
+        query: str | None = None,
     ) -> None:
         if not catalog_result:
             return
-        interest = infer_catalog_interest(catalog_result, reply)
+        interest = (
+            named_catalog_item(catalog_result, query or "")
+            or named_catalog_item(catalog_result, reply)
+            or infer_catalog_interest(catalog_result, reply)
+        )
         if not interest:
             return
-        if client.product and client.product != interest:
-            client.original_interests = list(client.original_interests or [client.product])
+        current = client.current_interest
+        if current and current.lower() != interest.lower() and current.lower() in interest.lower():
+            interest = current
+        previous = current or client.product
+        ConversationService._snapshot_original_topic(client, previous, interest)
         client.current_interest = interest[:300]
-        if has_contact(client):
+        if not has_contact(client):
+            return
+        categories = catalog_categories_in_result(catalog_result)
+        product_is_category = bool(client.product) and client.product.lower() in categories
+        if not client.product or product_is_category:
             client.product = interest[:300]
             if client.status == "уточнение продукта":
                 client.status = "уточнение объёма"
@@ -1496,11 +1736,14 @@ class ConversationService:
     @staticmethod
     def _apply_turn_facts(client: ClientProfile, turn: AiTurn) -> None:
         if turn.product:
-            if client.product and client.product != turn.product:
-                client.original_interests = list(client.original_interests or [client.product])
+            ConversationService._snapshot_original_topic(client, client.product, turn.product)
             client.current_interest = turn.product[:300]
             client.product = turn.product[:300]
-        if turn.volume and looks_like_volume(turn.volume):
+        if (
+            turn.volume
+            and looks_like_volume(turn.volume)
+            and (not client.volume or not _looks_like_packaging_fragment(turn.volume))
+        ):
             client.volume = turn.volume[:300]
         if is_qualified(client) and client.status not in {"готов к заказу", "получил предложение"}:
             client.status = "квалифицирован"

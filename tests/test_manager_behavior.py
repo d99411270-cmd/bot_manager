@@ -602,3 +602,28 @@ async def test_invalid_mobile_attempt_does_not_overwrite_phone_or_landline(now, 
     assert saved.phone is None
     assert saved.landline == "646647"
     assert "номер" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_volume_digits_are_not_a_landline(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(ClientProfile(206, name="Игорь", status="ожидает телефон"))
+    service = ConversationService(
+        repo,
+        SemanticAI(
+            [analysis("question")],
+            [AiTurn(reply="По картофелю и рожкам посчитаю после каталога.")],
+        ),
+        clock=lambda: now,
+    )
+
+    result = await service.handle(
+        IncomingMessage(206, None, "100 кг это 4 сетки, рожки 10 упаковок, посчитайте итого")
+    )
+    saved = await repo.get_client(206)
+
+    assert saved.landline is None
+    assert saved.phone is None
+    assert "городской номер" not in result.text.lower()
+    assert saved.name == "Игорь"
+    assert saved.last_name is None

@@ -441,6 +441,39 @@ def infer_catalog_interest(result: str, reply: str) -> str | None:
     return " и ".join(categories) if categories else None
 
 
+def named_catalog_item(result: str, text: str) -> str | None:
+    """Return one subcategory named in the utterance or reply; mixed hits stay ambiguous."""
+    if not text or not _catalog_result_has_positions(result):
+        return None
+    lowered = text.lower()
+    items: list[str] = []
+    for raw_line in result.splitlines():
+        if "SKU:" not in raw_line:
+            continue
+        subcategory = _field(raw_line, "Подкатегория")
+        if not subcategory:
+            continue
+        tokens = [
+            word for word in re.findall(r"[а-яёa-z0-9-]+", subcategory.lower()) if len(word) >= 3
+        ]
+        if (
+            subcategory.lower() in lowered or any(token in lowered for token in tokens)
+        ) and subcategory not in items:
+            items.append(subcategory)
+    return items[0] if len(items) == 1 else None
+
+
+def catalog_categories_in_result(result: str) -> set[str]:
+    categories: set[str] = set()
+    for raw_line in result.splitlines():
+        if "SKU:" not in raw_line:
+            continue
+        category = _field(raw_line, "Категория")
+        if category:
+            categories.add(category.lower())
+    return categories
+
+
 def _catalog_result_has_positions(result: str) -> bool:
     return any("SKU:" in line for line in result.splitlines())
 
