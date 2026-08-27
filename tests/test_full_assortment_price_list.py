@@ -8,6 +8,7 @@ from stokozavr_bot.repositories import InMemoryCRMRepository
 from stokozavr_bot.service import (
     CATALOG_NO_MATCH_REPLY,
     EMAIL_QUESTION,
+    FULL_ASSORTMENT_EMAIL_OFFER,
     PRODUCT_QUESTION,
     ConversationService,
     wants_full_assortment,
@@ -73,6 +74,12 @@ def _dima(telegram_id: int = 679025492) -> ClientProfile:
         "всё что есть",
         "все что имеется",
         "что есть",
+        "еда",
+        "продукты питания",
+        "продукты",
+        "продовольствие",
+        "питание",
+        "интересует еда",
     ],
 )
 def test_wants_full_assortment_covers_live_phrases_and_paraphrases(text):
@@ -90,6 +97,8 @@ def test_wants_full_assortment_covers_live_phrases_and_paraphrases(text):
         "всё беру",
         "морковь",
         "прайс есть?",
+        "молочные продукты",
+        "готовая еда",
     ],
 )
 def test_wants_full_assortment_skips_browse_sku_and_explicit_price(text):
@@ -205,3 +214,34 @@ async def test_short_category_browse_does_not_auto_offer_price_list(now):
     assert result.attachment_content is None
     assert saved.price_list_requested is False
     assert "морков" in result.text.lower() or "овощ" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_live_food_hypernyms_offer_price_list_not_catalog_no_match(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(
+            telegram_id=741,
+            name="Дмитрий",
+            phone="+799****0492",
+            status="уточнение продукта",
+        )
+    )
+    await repository.append_history(741, now, "Дмитрий", PRODUCT_QUESTION)
+    service = ConversationService(repository, NoAI(), clock=lambda: now)
+
+    first = await service.handle(IncomingMessage(741, None, "продукты питания"))
+    after_first = await repository.get_client(741)
+    second = await service.handle(IncomingMessage(741, None, "еда"))
+    saved = await repository.get_client(741)
+
+    assert first.text == FULL_ASSORTMENT_EMAIL_OFFER
+    assert second.text == FULL_ASSORTMENT_EMAIL_OFFER
+    assert CATALOG_NO_MATCH_REPLY not in first.text
+    assert CATALOG_NO_MATCH_REPLY not in second.text
+    assert after_first.catalog_no_match_query is None
+    assert saved.catalog_no_match_query is None
+    assert after_first.product not in {"еда", "продукты питания"}
+    assert saved.product not in {"еда", "продукты питания"}
+    assert after_first.price_list_requested is True
+    assert saved.price_list_requested is True

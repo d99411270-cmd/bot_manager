@@ -207,6 +207,8 @@ def _is_known_stock_followup(text: str, catalog_result: str | None) -> bool:
 
 _FULL_ASSORTMENT_UNIVERSAL = frozenset({"вся", "все", "весь", "всю"})
 _FULL_ASSORTMENT_CATALOG_STEMS = ("продукт", "категор", "ассортимент", "товар")
+_FULL_ASSORTMENT_FOOD_HYPERNYMS = frozenset({"еда", "еду", "еде"})
+_FULL_ASSORTMENT_FOOD_HYPERNYM_STEMS = ("продукт", "питани", "продовольств", "пищев")
 _FULL_ASSORTMENT_FILLERS = frozenset(
     {
         "пожалуйста",
@@ -315,6 +317,12 @@ def _is_occupation_client_type(
     )
 
 
+def _is_catalog_wide_food_hypernym(token: str) -> bool:
+    if token in _FULL_ASSORTMENT_FOOD_HYPERNYMS:
+        return True
+    return any(token.startswith(stem) for stem in _FULL_ASSORTMENT_FOOD_HYPERNYM_STEMS)
+
+
 def wants_full_assortment(text: str) -> bool:
     """Whole catalog by meaning: not an SKU and not order volume."""
     normalized = _normalize_utterance(text)
@@ -336,7 +344,9 @@ def wants_full_assortment(text: str) -> bool:
         for token in tokens
         if token not in _FULL_ASSORTMENT_FILLERS and token not in _FULL_ASSORTMENT_UNIVERSAL
     ]
-    return bool(has_universal and not content)
+    if has_universal and not content:
+        return True
+    return bool(content) and all(_is_catalog_wide_food_hypernym(token) for token in content)
 
 
 def _is_broad_assortment_utterance(text: str) -> bool:
