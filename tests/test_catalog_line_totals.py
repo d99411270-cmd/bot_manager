@@ -215,8 +215,8 @@ def test_incomplete_record_does_not_invent_a_total():
 
 
 def test_competitor_is_not_quoted_without_linked_opt_in():
-    blocked = line_total_quote("Яблоневый Край", "20 кг")
-    allowed = line_total_quote("Яблоневый Край", "20 кг", include_linked_competitor=True)
+    blocked = line_total_quote("FRU-APPLE-ALT-001", "20 кг")
+    allowed = line_total_quote("FRU-APPLE-ALT-001", "20 кг", include_linked_competitor=True)
 
     assert isinstance(blocked, QuoteFailure)
     assert blocked.reason == "competitor_blocked"

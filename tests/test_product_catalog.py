@@ -284,6 +284,39 @@ def test_local_catalog_has_exactly_30_primary_and_30_scoped_competitors():
         assert int(competitor.price.split()[0]) > int(source.price.split()[0])
 
 
+DEAD_COMPETITOR_BRANDS = (
+    "крупяной берег",
+    "росинка поля",
+    "белый колос",
+    "источник луга",
+    "яблоневый край",
+    "сахарный дом",
+    "белая мельница",
+    "солнечный шиповник",
+    "северная ягода",
+    "янтарный лист",
+)
+
+
+def test_competitor_rows_use_retail_chain_stubs_not_brand_names():
+    records = _all_records()
+    competitors = [record for record in records if record.is_competitor]
+    catalog_text = "\n".join(path.read_text(encoding="utf-8") for path in REPO_CATALOG.glob("*.md"))
+    haystack = catalog_text.lower()
+
+    assert competitors
+    for competitor in competitors:
+        assert competitor.manufacturer.lower() == "розничные сети"
+        assert competitor.for_sku
+        assert "₽" in competitor.price
+    for brand in DEAD_COMPETITOR_BRANDS:
+        assert brand not in haystack
+    juice = next(item for item in competitors if item.for_sku == "SOK-APPLE-001")
+    buckwheat = next(item for item in competitors if item.for_sku == "GRC-BUCKWHEAT-001")
+    assert juice.price.startswith("990")
+    assert buckwheat.price.startswith("810")
+
+
 def test_every_primary_product_is_searchable_without_competitor_leakage():
     records = [record for record in _all_records() if not record.is_competitor]
 

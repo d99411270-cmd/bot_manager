@@ -91,7 +91,7 @@ def test_pyproject_force_includes_prompts_in_wheel():
     assert "stokozavr_bot/prompts" in text
 
 
-def test_dialogue_rules_tell_ivan_to_name_linked_competitor_once_on_primary_quote():
+def test_dialogue_rules_tell_ivan_to_compare_retail_once_on_primary_quote():
     from stokozavr_bot.deepseek import SYSTEM_PROMPT
 
     rules = (REPO_PROMPTS / "dialogue_rules.md").read_text(encoding="utf-8").lower()
@@ -100,5 +100,10 @@ def test_dialogue_rules_tell_ivan_to_name_linked_competitor_once_on_primary_quot
     assert "один раз" in rules
     assert "не ждать" in rules or "сам" in rules
     assert "категори" in rules
+    assert "сетев" in rules or "розничн" in rules
+    assert "крупяной" not in rules
+    assert "росинка" not in rules
     assert "полностью игнорируй" not in prompt
     assert "один раз" in prompt
+    assert "сетев" in prompt or "розничн" in prompt
+    assert "крупяной" not in prompt

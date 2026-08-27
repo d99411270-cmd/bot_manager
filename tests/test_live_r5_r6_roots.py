@@ -230,8 +230,9 @@ async def test_known_apple_manufacturer_is_answered_not_handoff(now):
     assert "садовый север" in lowered
     assert "нет подтверждённого производителя" not in lowered
     assert saved.needs_human is False
-    assert "яблоневый край" in lowered
+    assert "яблоневый край" not in lowered
     assert "900" in result.text
+    assert "сетев" in lowered or "розничн" in lowered
 
 
 @pytest.mark.asyncio

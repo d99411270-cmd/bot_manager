@@ -430,6 +430,80 @@ def _reply_is_identity_questionnaire_only(reply: str) -> bool:
     return not bool(re.search(r"₽|\bруб", stripped))
 
 
+def _asks_packing(text: str) -> bool:
+    """Packing/фасовка question, not «цена за банку, а не упаковку»."""
+    lowered = (text or "").lower()
+    if re.search(r"а не упаковк|цен\w*.{0,20}упаковк|за\s+(?:1\s+)?банк", lowered):
+        return False
+    return bool(
+        re.search(
+            r"(?:какая|какой|какую|какие)\s+(?:у\s+вас\s+)?(?:фасовк\w*|упаковк\w*)|"
+            r"\bфасовк\w*\s*\?",
+            lowered,
+        )
+    )
+
+
+def _asks_unknown_brand(text: str) -> bool:
+    """True when the client names a brand/mark that is not a catalog topic."""
+    if asks_about_manufacturer(text):
+        return True
+    lowered = (text or "").lower()
+    if re.search(r"марк\w*|бренд\w*", lowered):
+        return True
+    if _utterance_search_key(text):
+        return False
+    if not re.search(r"\bесть\b|\bналич", lowered):
+        return False
+    tokens = [
+        token
+        for token in re.findall(r"[а-яёa-z0-9-]+", lowered.replace("ё", "е"))
+        if len(token) >= 4
+    ]
+    fillers = {
+        "вас",
+        "есть",
+        "какой",
+        "какая",
+        "какие",
+        "какое",
+        "можете",
+        "налич",
+        "просто",
+        "сейчас",
+        "вообще",
+        "наличие",
+    }
+    return any(token not in fillers for token in tokens)
+
+
+def _user_asked_packing_brand_or_availability(text: str) -> bool:
+    if _asks_packing(text) or asks_about_manufacturer(text) or _asks_unknown_brand(text):
+        return True
+    lowered = (text or "").lower()
+    return bool(
+        re.search(r"\bесть\b|\bналич", lowered)
+        and (_utterance_search_key(text) or _is_anaphoric_followup(text))
+    )
+
+
+def _reply_is_volume_questionnaire_only(reply: str) -> bool:
+    stripped = (reply or "").strip()
+    if not stripped or not _reply_reasks_volume(stripped):
+        return False
+    if re.search(
+        r"₽|\bруб|фасовк|упаковк|производител|марки нет|не возим",
+        stripped.lower(),
+    ):
+        return False
+    without_question = re.sub(
+        r"(?i)(?:подскажите,\s+пожалуйста,\s+)?какой\s+объ[её]м[^.?]*[.?]?",
+        "",
+        stripped,
+    ).strip(" ,.;")
+    return len(without_question) < 8
+
+
 def asks_for_competitor(text: str) -> bool:
     return bool(re.search(r"подешев\w*|есть вариант\w*|сравн\w*|альтернатив\w*", text.lower()))
 
@@ -509,13 +583,19 @@ def _is_primary_position_quote(text: str) -> bool:
     return bool(_is_anaphoric_followup(text) and (asks_presence or asks_price))
 
 
+def _retail_comparison_clause(competitor) -> str:
+    token = _price_token(competitor.price)
+    amount = f"{token} ₽" if token else competitor.price
+    return f"В обычных сетевых магазинах такая фасовка доходит до {amount}."
+
+
 def ensure_unsolicited_linked_competitor(
     client: ClientProfile,
     user_message: str,
     text: str,
     catalog_result: str | None,
 ) -> str:
-    """Name the dearer linked competitor once on a specific primary quote."""
+    """Compare once with retail-chain price on a specific primary quote, never a rival brand."""
     if asks_for_competitor(user_message) or asks_for_price_list(user_message):
         return text
     if not _is_primary_position_quote(user_message):
@@ -530,7 +610,7 @@ def ensure_unsolicited_linked_competitor(
     competitor = _linked_more_expensive_competitor(primaries[0])
     if competitor is None:
         return text
-    return f"{text.rstrip()} Для сравнения {competitor.manufacturer} — {competitor.price}."
+    return f"{text.rstrip()} {_retail_comparison_clause(competitor)}"
 
 
 def _allow_unsolicited_or_requested_competitor(
@@ -653,6 +733,16 @@ def _deterministic_recovery_reply(text: str, catalog_result: str) -> str | None:
     )
     if calculation and "макарон" in lowered:
         return f"По картофелю подтверждено: {calculation.group(1)} — {calculation.group(2)} ₽. По макаронам какую фасовку выбрать?"
+    primaries = _primary_records_in_result(catalog_result)
+    if _asks_packing(text) and len(primaries) == 1:
+        record = primaries[0]
+        return f"{record.subcategory}: фасовка {record.packaging}."
+    if _asks_unknown_brand(text) and len(primaries) == 1:
+        record = primaries[0]
+        return (
+            f"Этой марки нет. У нас {record.subcategory} {record.manufacturer}, "
+            f"фасовка {record.packaging}, {record.price}."
+        )
     return None
 
 
@@ -1058,6 +1148,10 @@ def _reject_turn(
             _is_catalog_product_or_price_utterance(user_text) or _is_volume_only_followup(user_text)
         )
     ):
+        return "invalid_reply"
+    if _reply_is_volume_questionnaire_only(
+        turn.reply
+    ) and _user_asked_packing_brand_or_availability(user_text):
         return "invalid_reply"
     if client.requested_slot and re.search(r"во сколько", turn.reply.lower()):
         return "invalid_reply"
@@ -1530,6 +1624,9 @@ def resolve_catalog_query(
         and requested_identity_slot(client) not in {"phone", "email"}
         and not _is_referential_followup(text)
     ):
+        if _asks_unknown_brand(text) and (client.current_interest or client.product):
+            topic = client.current_interest or client.product
+            return topic, "interest"
         return semantic_product, "semantic"
     if _is_volume_only_followup(text):
         sticky = client.catalog_no_match_query or client.current_interest or client.product
@@ -1585,8 +1682,15 @@ def _text_has_price_amount(text: str, token: str) -> bool:
     return bool(re.search(rf"\b{re.escape(token)}\b\s*(?:₽|руб)", text, re.IGNORECASE))
 
 
+def _reply_shows_retail_chain(text: str) -> bool:
+    """True for retail-chain comparison phrasing, not potato «сетки»."""
+    return bool(re.search(r"розничн\w*|сетев\w+", (text or "").lower()))
+
+
 def _reply_shows_competitor(text: str) -> bool:
-    """True when the client can see a named competitor or a competitor-only price."""
+    """True when the client can see a retail comparison or a competitor-only price."""
+    if _reply_shows_retail_chain(text):
+        return True
     lowered = text.lower()
     _primary_prices, competitor_only = _competitor_price_sets()
     for record in _all_records():
@@ -1621,7 +1725,12 @@ def _line_has_primary_facts(text: str) -> bool:
 
 def _erase_competitor_tokens(text: str) -> str:
     _primary_prices, competitor_only = _competitor_price_sets()
-    result = text
+    result = re.sub(
+        r"(?i)(?:в\s+)?(?:обычных\s+)?(?:розничных\s+сетях|сетевых\s+магазинах)"
+        r"(?:\s+такая\s+фасовка)?(?:\s+доходит\s+до|\s+до)?\s*",
+        "",
+        text,
+    )
     for record in _all_records():
         if not record.is_competitor:
             continue
@@ -1695,6 +1804,7 @@ class ConversationService:
         history_limit: int = 10,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         followup_delay: timedelta = FOLLOWUP_DELAY,
+        followup_rng=None,
         handoff: ManagerHandoff | None = None,
     ) -> None:
         self.repository = repository
@@ -1702,6 +1812,7 @@ class ConversationService:
         self.history_limit = history_limit
         self.clock = clock
         self.followup_delay = followup_delay
+        self.followup_rng = followup_rng
         self.handoff = handoff
         self._turn_catalog_result: str | None = None
 
@@ -1995,7 +2106,7 @@ class ConversationService:
                 )
                 competitor = _linked_more_expensive_competitor(record)
                 if competitor:
-                    reply += f" Для сравнения {competitor.manufacturer} — {competitor.price}."
+                    reply += f" {_retail_comparison_clause(competitor)}"
                 return await self._finish(client, message.text, BotReply(reply), now)
             client.needs_human = True
             client.comment = "Нужен менеджер: подтвердить производителя"
@@ -2156,6 +2267,7 @@ class ConversationService:
             )
             and not (unit_quote or line_quote or composite_quote)
             and not (_is_volume_only_followup(text) and (client.current_interest or client.product))
+            and not _user_asked_packing_brand_or_availability(text)
         ):
             return await self._finish(
                 client, message.text, BotReply(self._next_question_after_capture(client)), now
@@ -2380,6 +2492,12 @@ class ConversationService:
                     captured = True
         previous_topic = client.current_interest or client.product
         chosen_product = _specific_intake_product(text, semantic)
+        if (
+            chosen_product
+            and _asks_unknown_brand(text)
+            and (client.current_interest or client.product)
+        ):
+            chosen_product = None
         if (
             allow_catalog_facts
             and can_read_semantic
@@ -2975,7 +3093,7 @@ class ConversationService:
         reply: BotReply,
         now: datetime,
     ) -> BotReply:
-        apply_followup_rules(client, user_message, reply.text, now, self.followup_delay)
+        apply_followup_rules(client, user_message, reply.text, now, rng=self.followup_rng)
         text = ensure_unsolicited_linked_competitor(
             client, user_message, reply.text, self._turn_catalog_result
         )

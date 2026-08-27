@@ -57,13 +57,13 @@ async def _compose_followup(
     planner: FollowupPlanner | None,
 ) -> str | None:
     if planner is None:
-        return followup_text(client)
+        return followup_text(client, history)
     plan = await planner(client, history)
     if not plan.appropriate:
         return None
     if plan.reply and is_valid_ai_reply(plan.reply):
         return plan.reply.strip()
-    return followup_text(client)
+    return followup_text(client, history)
 
 
 async def followup_loop(
