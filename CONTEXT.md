@@ -53,6 +53,12 @@
 
 ## Проверка
 
+- На 2026-08-27 production deploy `038ccc8` / `stable-production-038ccc8`:
+- GitHub `main` запушен. `wants_full_assortment("еда")` и `("продукты питания")` = True в site-packages. «молочные продукты» / «готовая еда» = False.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T10:53:31Z, pid 309970. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 5 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
+
 - На 2026-08-27 production deploy `b685fa3` / `stable-production-b685fa3`:
 - GitHub `main` запушен. Пакет `--reinstall` в site-packages: `line_total_quote("яблоки","20 кг")=1640 ₽`, конкуренты = «розничные сети» (30 stub), сравнение «доходит до 810 ₽» без Крупяной, прайс 30 SKU без розницы.
 - `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T10:34:35Z, pid 308701. MAX и Xray остались `active`.
