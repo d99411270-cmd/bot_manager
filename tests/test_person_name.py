@@ -42,6 +42,27 @@ def test_parse_full_name():
     assert parse_person_name("Огурцы много") is None
 
 
+@pytest.mark.parametrize(
+    ("raw", "official"),
+    [
+        ("Ванёк", "Иван"),
+        ("Ванек", "Иван"),
+        ("ваня", "Иван"),
+        ("Ванька", "Иван"),
+        ("Диман", "Дмитрий"),
+        ("Димон", "Дмитрий"),
+        ("дима", "Дмитрий"),
+        ("Димка", "Дмитрий"),
+        ("Сергей", "Сергей"),
+    ],
+)
+def test_parse_person_name_maps_diminutives_to_official(raw, official):
+    parsed = parse_person_name(raw)
+    assert parsed is not None
+    assert parsed[0] == official
+    assert parsed[1] is None
+
+
 @pytest.mark.asyncio
 async def test_bot_addresses_first_name_and_keeps_last_name(now):
     repo = InMemoryCRMRepository()
@@ -201,3 +222,44 @@ async def test_name_correction_replaces_first_name(now):
 
     assert saved.name == "Настя"
     assert saved.last_name is None
+
+
+@pytest.mark.asyncio
+async def test_vanek_is_stored_as_ivan(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(80, None, "Ванёк"))
+    saved = await repo.get_client(80)
+
+    assert saved is not None
+    assert saved.name == "Иван"
+    assert "Иван" in result.text
+    assert "Ванёк" not in result.text
+    assert PHONE_QUESTION in result.text
+
+
+@pytest.mark.asyncio
+async def test_diman_is_stored_as_dmitry(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(81, None, "Диман"))
+    saved = await repo.get_client(81)
+
+    assert saved is not None
+    assert saved.name == "Дмитрий"
+    assert "Дмитрий" in result.text
+    assert "Диман" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_sergey_is_unchanged_on_capture(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    await service.handle(IncomingMessage(82, None, "Сергей"))
+    saved = await repo.get_client(82)
+
+    assert saved is not None
+    assert saved.name == "Сергей"

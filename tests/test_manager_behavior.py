@@ -374,7 +374,9 @@ async def test_assortment_question_without_phone_uses_ai_not_form(now):
     result = await service.handle(IncomingMessage(100, None, "а какая у вас есть?"))
     saved = await repo.get_client(100)
 
-    assert result.text.endswith(ai_reply)
+    assert "бакалея" in result.text.lower() or "продукт" in result.text.lower()
+    assert "почт" in result.text.lower()
+    assert "чат" in result.text.lower()
     assert "выслать актуальный прайс" not in result.text.lower()
     assert "могу проконсультировать по товарам" not in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
@@ -488,12 +490,15 @@ async def test_fruits_question_without_phone_does_not_contain_product_question(n
     result = await service.handle(IncomingMessage(200, None, "какие фрукты есть?"))
     saved = await repo.get_client(200)
 
-    assert result.text.endswith(ai_reply)
+    assert "яблоки" in result.text.lower()
+    assert "почт" in result.text.lower()
+    assert "чат" in result.text.lower()
     assert "выслать актуальный прайс" not in result.text.lower()
     assert "могу проконсультировать по товарам" not in result.text.lower()
     assert PRODUCT_QUESTION not in result.text
     assert PRODUCT_ASSORTMENT not in result.text
     assert "номер телефона" not in result.text.lower()
+    assert result.text.count("?") <= 1
     assert saved.phone is None
     assert saved.product is None
     assert len(service.ai.respond_calls) == 1
@@ -515,7 +520,9 @@ async def test_name_capture_does_not_interrupt_product_answer(now):
     result = await service.handle(IncomingMessage(201, None, "Анна, какие фрукты есть?"))
     saved = await repo.get_client(201)
 
-    assert result.text.endswith(ai_reply)
+    assert "яблоки" in result.text.lower() or "банан" in result.text.lower()
+    assert "почт" in result.text.lower()
+    assert "чат" in result.text.lower()
     assert "выслать актуальный прайс" not in result.text.lower()
     assert "могу проконсультировать по товарам" not in result.text.lower()
     assert saved.name == "Анна"
@@ -523,6 +530,7 @@ async def test_name_capture_does_not_interrupt_product_answer(now):
     assert saved.product is None
     assert PRODUCT_QUESTION not in result.text
     assert "номер телефона" not in result.text.lower()
+    assert result.text.count("?") <= 1
     assert len(service.ai.respond_calls) == 1
 
 

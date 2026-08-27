@@ -209,11 +209,13 @@ async def test_short_category_browse_does_not_auto_offer_price_list(now):
     result = await service.handle(IncomingMessage(732, None, "какие овощи?"))
     saved = await repository.get_client(732)
 
-    assert "почт" not in result.text.lower()
+    assert "морков" in result.text.lower() or "овощ" in result.text.lower()
+    assert "почт" in result.text.lower()
+    assert "чат" in result.text.lower()
     assert EMAIL_QUESTION not in result.text
     assert result.attachment_content is None
     assert saved.price_list_requested is False
-    assert "морков" in result.text.lower() or "овощ" in result.text.lower()
+    assert result.text.count("?") <= 1
 
 
 @pytest.mark.asyncio

@@ -92,7 +92,11 @@ EMAIL_QUESTION = "Тогда оставьте, пожалуйста, почту 
 FULL_ASSORTMENT_EMAIL_OFFER = (
     "Весь ассортимент удобнее отправить прайсом. На какую почту отправить?"
 )
+PRICE_LIST_EMAIL_OFFER = "На какую почту отправить прайс?"
 PRICE_LIST_EMAIL_ACK = "Ок, почту записал. Вам отправят актуальный прайс."
+PRICE_CONSULT_FORK = "Могу сразу выслать прайс на почту или подсказать в чате — как удобнее?"
+PRICE_CONSULT_CHAT_CONTINUE = "Хорошо, подскажу в чате. Что уточним?"
+PRICE_CONSULT_OFFERED_MARKER = "Прайс-консультация предложена"
 SKIP_CONTACT = "Хорошо, продолжим без контакта. "
 _CAPTURE_INTENTS = {"provide_data", "correction"}
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -696,7 +700,73 @@ def _price_list_pending_from_history(history: list[HistoryEntry]) -> bool:
     if not history:
         return False
     latest = history[-1]
-    return asks_for_price_list(latest.user_message) and "почт" in latest.assistant_message.lower()
+    if "почт" not in latest.assistant_message.lower():
+        return False
+    return asks_for_price_list(latest.user_message) or wants_full_assortment(latest.user_message)
+
+
+def _price_consult_offered(client: ClientProfile) -> bool:
+    return bool(client.comment and PRICE_CONSULT_OFFERED_MARKER in client.comment)
+
+
+def _mark_price_consult_offered(client: ClientProfile) -> None:
+    client.comment = ConversationService._with_comment(client.comment, PRICE_CONSULT_OFFERED_MARKER)
+
+
+def _is_consult_chat_choice(text: str) -> bool:
+    if asks_for_price_list(text) or _rejects_email_delivery(text):
+        return False
+    return bool(
+        re.search(
+            r"подскаж\w*.{0,16}(?:тут|здесь|в\s+чате)|"
+            r"(?:тут|здесь)\s+подскаж|"
+            r"\bв\s+чате\b|"
+            r"лучше\s+(?:тут|здесь|в\s+чате)",
+            text.lower(),
+        )
+    )
+
+
+def _is_consult_email_choice(text: str) -> bool:
+    if _rejects_email_delivery(text) or _is_consult_chat_choice(text):
+        return False
+    return bool(re.search(r"на почт|e-?mail|почтой", text.lower()))
+
+
+def _looks_like_price_consult_fork(text: str) -> bool:
+    lowered = (text or "").lower()
+    return "почт" in lowered and "чат" in lowered
+
+
+def _last_assistant_was_price_consult(history: list[HistoryEntry]) -> bool:
+    if not history:
+        return False
+    return _looks_like_price_consult_fork(history[-1].assistant_message)
+
+
+def _is_product_talk_turn(text: str) -> bool:
+    if asks_for_price_list(text) or wants_full_assortment(text):
+        return False
+    return (
+        asks_about_assortment(text)
+        or _is_primary_position_quote(text)
+        or _is_catalog_or_price_question(text)
+    )
+
+
+def _drop_questions(text: str) -> str:
+    stripped = (text or "").strip()
+    if "?" not in stripped:
+        return stripped
+    parts = re.split(r"(?<=[.!])\s+", stripped)
+    kept = [part for part in parts if "?" not in part]
+    return " ".join(kept).strip()
+
+
+def _wants_price_list_file_now(text: str, pending_price_list: bool) -> bool:
+    if not _wants_price_list_in_chat(text):
+        return False
+    return asks_for_price_list(text) or wants_full_assortment(text) or pending_price_list
 
 
 PRICE_LIST_CHAT_REPLY = "Отправляю актуальный прайс прямо сюда."
@@ -1057,6 +1127,41 @@ _NAME_STOP = {
     "номер",
 }
 
+_DIMINUTIVE_FIRST_NAMES = {
+    "ванек": "Иван",
+    "ваня": "Иван",
+    "ванька": "Иван",
+    "диман": "Дмитрий",
+    "димон": "Дмитрий",
+    "дима": "Дмитрий",
+    "димка": "Дмитрий",
+    "вова": "Владимир",
+    "вовка": "Владимир",
+    "володя": "Владимир",
+    "коля": "Николай",
+    "колька": "Николай",
+    "колян": "Николай",
+    "петя": "Пётр",
+    "петька": "Пётр",
+    "миша": "Михаил",
+    "мишка": "Михаил",
+    "сережа": "Сергей",
+    "серега": "Сергей",
+    "леша": "Алексей",
+    "алеша": "Алексей",
+    "паша": "Павел",
+    "вася": "Василий",
+    "васька": "Василий",
+}
+
+
+def _official_first_name(first: str) -> str:
+    key = first.lower().replace("ё", "е")
+    mapped = _DIMINUTIVE_FIRST_NAMES.get(key)
+    if mapped:
+        return mapped
+    return first.capitalize() if first.islower() else first
+
 
 def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
     if not value:
@@ -1073,7 +1178,7 @@ def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
         letters = re.sub(r"[.\-]", "", part)
         if not 2 <= len(part) <= 40 or not letters.isalpha() or part.lower() in _NAME_STOP:
             return None
-    first = parts[0].capitalize() if parts[0].islower() else parts[0]
+    first = _official_first_name(parts[0])
     last = " ".join(parts[1:]) or None
     return first, last
 
@@ -1825,6 +1930,7 @@ class ConversationService:
         self.followup_rng = followup_rng
         self.handoff = handoff
         self._turn_catalog_result: str | None = None
+        self._price_consult_eligible = False
 
     @staticmethod
     def should_use_ai(client: ClientProfile | None, text: str) -> bool:
@@ -1836,6 +1942,13 @@ class ConversationService:
         if asks_for_price_list(text):
             return False
         if wants_full_assortment(text):
+            return False
+        if (
+            client
+            and _price_consult_offered(client)
+            and not client.price_list_requested
+            and (_is_consult_chat_choice(text) or _is_consult_email_choice(text))
+        ):
             return False
         if (
             client
@@ -1854,6 +1967,7 @@ class ConversationService:
     async def handle(self, message: IncomingMessage) -> BotReply:
         now = self.clock()
         self._turn_catalog_result = None
+        self._price_consult_eligible = False
         client = await self.repository.get_client(message.telegram_id)
         if client is None:
             client = ClientProfile(
@@ -1968,6 +2082,13 @@ class ConversationService:
     ) -> BotReply:
         text = message.text.strip()
         history = await self.repository.get_history(client.telegram_id, self.history_limit)
+        self._price_consult_eligible = not (
+            _price_consult_offered(client)
+            or client.product
+            or client.current_interest
+            or client.price_list_sent_at
+            or client.price_list_requested
+        )
         pending_price_list = client.price_list_requested or (
             not client.price_list_sent_at and _price_list_pending_from_history(history)
         )
@@ -1979,18 +2100,9 @@ class ConversationService:
                 BotReply("Хорошо, без прайса."),
                 now,
             )
-        if asks_for_price_list_by_email(text) and not _wants_price_list_in_chat(text):
+        if _wants_price_list_file_now(text, pending_price_list):
             client.price_list_requested = True
-            if client.name and not has_contact(client):
-                client.status = "ожидает почту"
-            return await self._finish(
-                client,
-                message.text,
-                BotReply(EMAIL_QUESTION, delay=False),
-                now,
-            )
-        if asks_for_price_list(text) or (pending_price_list and _wants_price_list_in_chat(text)):
-            client.price_list_requested = True
+            _mark_price_consult_offered(client)
             return await self._finish(
                 client,
                 message.text,
@@ -2002,26 +2114,44 @@ class ConversationService:
                 ),
                 now,
             )
-        if wants_full_assortment(text):
+        if asks_for_price_list(text) or wants_full_assortment(text):
             client.price_list_requested = True
-            if _wants_price_list_in_chat(text):
-                return await self._finish(
-                    client,
-                    message.text,
-                    BotReply(
-                        PRICE_LIST_CHAT_REPLY,
-                        delay=False,
-                        attachment_content=generated_price_list(),
-                        attachment_filename=PRICE_LIST_FILENAME,
-                    ),
-                    now,
-                )
+            _mark_price_consult_offered(client)
+            offer = (
+                FULL_ASSORTMENT_EMAIL_OFFER
+                if wants_full_assortment(text) and not asks_for_price_list(text)
+                else PRICE_LIST_EMAIL_OFFER
+            )
+            if client.name and not has_contact(client):
+                client.status = "ожидает почту"
             return await self._finish(
                 client,
                 message.text,
-                BotReply(FULL_ASSORTMENT_EMAIL_OFFER, delay=False),
+                BotReply(offer, delay=False),
                 now,
             )
+        if (
+            _price_consult_offered(client)
+            and not pending_price_list
+            and _last_assistant_was_price_consult(history)
+        ):
+            if _is_consult_email_choice(text):
+                client.price_list_requested = True
+                if client.name and not has_contact(client):
+                    client.status = "ожидает почту"
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply(PRICE_LIST_EMAIL_OFFER, delay=False),
+                    now,
+                )
+            if _is_consult_chat_choice(text):
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply(PRICE_CONSULT_CHAT_CONTINUE, delay=False),
+                    now,
+                )
         if self._is_fulfillment_turn(client, text):
             return await self._handle_fulfillment(client, text, now)
         semantic = await self._safe_analyze(client, history, message.text)
@@ -3121,6 +3251,17 @@ class ConversationService:
             attachment_content=reply.attachment_content,
             attachment_filename=reply.attachment_filename,
         )
+        if self._should_append_price_consult(client, user_message, reply):
+            answer = _drop_questions(reply.text)
+            if answer:
+                _mark_price_consult_offered(client)
+                reply = BotReply(
+                    f"{answer} {PRICE_CONSULT_FORK}".strip(),
+                    request_contact=reply.request_contact,
+                    delay=reply.delay,
+                    attachment_content=reply.attachment_content,
+                    attachment_filename=reply.attachment_filename,
+                )
         if (
             reply_quoted_price(reply.text)
             and client.status != "готов к заказу"
@@ -3130,3 +3271,36 @@ class ConversationService:
         await self.repository.save_client(client)
         await self.repository.append_history(client.telegram_id, now, user_message, reply.text)
         return reply
+
+    def _should_append_price_consult(
+        self, client: ClientProfile, user_message: str, reply: BotReply
+    ) -> bool:
+        if not self._price_consult_eligible or _price_consult_offered(client):
+            return False
+        if reply.attachment_content:
+            return False
+        if asks_for_price_list(user_message) or wants_full_assortment(user_message):
+            return False
+        if not _is_product_talk_turn(user_message):
+            return False
+        text = (reply.text or "").strip()
+        if text in {
+            FALLBACK,
+            CATALOG_NO_MATCH_REPLY,
+            PRICE_LIST_EMAIL_OFFER,
+            FULL_ASSORTMENT_EMAIL_OFFER,
+            PRICE_LIST_CHAT_REPLY,
+            PRICE_LIST_EMAIL_ACK,
+            START_TEXT,
+            NAME_QUESTION,
+            PHONE_QUESTION,
+            EMAIL_QUESTION,
+            VOLUME_QUESTION,
+            PRICE_CONSULT_CHAT_CONTINUE,
+        }:
+            return False
+        if "без прайса" in text.lower():
+            return False
+        if _reply_is_identity_questionnaire_only(text):
+            return False
+        return not _looks_like_price_consult_fork(text)
