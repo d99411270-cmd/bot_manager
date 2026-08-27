@@ -54,6 +54,12 @@
 
 ## Проверка
 
+- На 2026-08-27 production deploy `36a0da2` / `stable-production-36a0da2`:
+- GitHub `main` запушен. Site-packages: `parse_person_name("Димас")=Дмитрий`, `wants_full_assortment("вся продукция")=True`, intake `vague_interest`.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T18:28:12Z, pid 344095. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 8 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
+
 - На 2026-08-27 (TDD: Димас→Дмитрий, не повторять имя каждый ход, vague/«вся продукция» → прайс на почту; без push/deploy):
 - `PYTHONPATH=src .venv/bin/pytest -q` — `643 passed`.
 - `ruff check .` / `ruff format --check .` / `git diff --check`.
