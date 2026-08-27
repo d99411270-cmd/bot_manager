@@ -53,10 +53,11 @@
 
 ## Проверка
 
-- На 2026-08-27 (TDD: прайс на почту сначала; разовая товарная развилка; уменьшительные имена; без push/deploy):
-- `PYTHONPATH=src .venv/bin/pytest -q` — `598 passed`.
-- `ruff check .` / `ruff format --check .` / `git diff --check` — чисто.
-- Пуш и деплой **не** выполнялись. CRM не трогали.
+- На 2026-08-27 production deploy `427de1b` / `stable-production-427de1b`:
+- GitHub `main` запушен. Site-packages: «прайс есть?» → `PRICE_LIST_EMAIL_OFFER`, Ванёк→Иван, Диман→Дмитрий.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T11:38:06Z, pid 312947. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 15 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
 
 - На 2026-08-27 production deploy `038ccc8` / `stable-production-038ccc8`:
 - GitHub `main` запушен. `wants_full_assortment("еда")` и `("продукты питания")` = True в site-packages. «молочные продукты» / «готовая еда» = False.
