@@ -108,8 +108,10 @@ async def test_vsyo_does_not_prefix_price_list_offer(now, message):
 
     _assert_no_price_list_spam(result.text)
     _assert_not_muzzle(result.text)
-    assert result.text == "Работаем оптом по основным категориям. Что смотрите?"
-    assert ai.catalog_calls
+    assert result.attachment_content is None
+    assert "почт" in result.text.lower()
+    assert "прайс" in result.text.lower()
+    assert not ai.catalog_calls
 
 
 @pytest.mark.asyncio

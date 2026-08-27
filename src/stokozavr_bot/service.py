@@ -89,6 +89,10 @@ PHONE_REFUSAL = (
     "связаться по вопросам заказа. "
 )
 EMAIL_QUESTION = "Тогда оставьте, пожалуйста, почту для связи и закрепления информации о вас."
+FULL_ASSORTMENT_EMAIL_OFFER = (
+    "Весь ассортимент удобнее отправить прайсом. На какую почту отправить?"
+)
+PRICE_LIST_EMAIL_ACK = "Ок, почту записал. Вам отправят актуальный прайс."
 SKIP_CONTACT = "Хорошо, продолжим без контакта. "
 _CAPTURE_INTENTS = {"provide_data", "correction"}
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -201,14 +205,51 @@ def _is_known_stock_followup(text: str, catalog_result: str | None) -> bool:
     return bool(re.search(r"\b(?:в наличии|на складе|налич\w*)\b", lowered))
 
 
-_BROAD_ASSORTMENT_PHRASES = frozenset(
+_FULL_ASSORTMENT_UNIVERSAL = frozenset({"вся", "все", "весь", "всю"})
+_FULL_ASSORTMENT_CATALOG_STEMS = ("продукт", "категор", "ассортимент", "товар")
+_FULL_ASSORTMENT_FILLERS = frozenset(
     {
-        "вся",
-        "все",
-        "все что есть",
-        "что есть",
-        "все что имеется",
-        "что имеется",
+        "пожалуйста",
+        "мне",
+        "нам",
+        "у",
+        "вас",
+        "ваш",
+        "ваша",
+        "ваше",
+        "ваши",
+        "которые",
+        "который",
+        "которая",
+        "которое",
+        "из",
+        "в",
+        "и",
+        "то",
+        "просто",
+        "бы",
+        "можно",
+        "давайте",
+        "дайте",
+        "дай",
+        "покажите",
+        "покажи",
+        "пришлите",
+        "скиньте",
+        "вышлите",
+        "отправьте",
+        "хочу",
+        "хотел",
+        "хотела",
+        "нужны",
+        "нужен",
+        "нужна",
+        "нужно",
+        "интересует",
+        "интересуют",
+        "есть",
+        "имеется",
+        "что",
     }
 )
 
@@ -274,9 +315,33 @@ def _is_occupation_client_type(
     )
 
 
+def wants_full_assortment(text: str) -> bool:
+    """Whole catalog by meaning: not an SKU and not order volume."""
+    normalized = _normalize_utterance(text)
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    if "много" in tokens and "всего" in tokens:
+        return True
+    has_universal = any(token in _FULL_ASSORTMENT_UNIVERSAL for token in tokens)
+    has_catalog_wide = any(
+        token.startswith(stem) for token in tokens for stem in _FULL_ASSORTMENT_CATALOG_STEMS
+    )
+    if has_universal and has_catalog_wide:
+        return True
+    if normalized in {"что есть", "что имеется"} or normalized.startswith("что есть из"):
+        return True
+    content = [
+        token
+        for token in tokens
+        if token not in _FULL_ASSORTMENT_FILLERS and token not in _FULL_ASSORTMENT_UNIVERSAL
+    ]
+    return bool(has_universal and not content)
+
+
 def _is_broad_assortment_utterance(text: str) -> bool:
-    """«Вся/все/всё что есть» is assortment browse, not an SKU."""
-    return _normalize_utterance(text) in _BROAD_ASSORTMENT_PHRASES
+    """«Вся/все категории» is full assortment, not an SKU."""
+    return wants_full_assortment(text)
 
 
 def asks_about_assortment(text: str) -> bool:
@@ -526,7 +591,8 @@ def _mentions_chat_here(text: str) -> bool:
 def _rejects_email_delivery(text: str) -> bool:
     return bool(
         re.search(
-            r"не на почт|на почт\w* не надо|на почт\w* не нужн|почту не надо|не надо на почт",
+            r"не на почт|на почт\w* не надо|на почт\w* не нужн|почту не надо|не надо на почт|"
+            r"почту не дам|не дам почт|без почт|не буду.{0,12}почт",
             text.lower(),
         )
     )
@@ -1648,6 +1714,8 @@ class ConversationService:
             return False
         if asks_for_price_list(text):
             return False
+        if wants_full_assortment(text):
+            return False
         if (
             client
             and client.price_list_requested
@@ -1688,13 +1756,10 @@ class ConversationService:
             email = normalize_email(text)
             if email:
                 client.email = email
-                reply_text = (
-                    f"Спасибо, {client.name}. Почту записал." if client.name else NAME_QUESTION
-                )
                 return await self._finish(
                     client,
                     message.text,
-                    BotReply(reply_text),
+                    BotReply(PRICE_LIST_EMAIL_ACK),
                     now,
                 )
         if (
@@ -1814,6 +1879,26 @@ class ConversationService:
                     attachment_content=generated_price_list(),
                     attachment_filename=PRICE_LIST_FILENAME,
                 ),
+                now,
+            )
+        if wants_full_assortment(text):
+            client.price_list_requested = True
+            if _wants_price_list_in_chat(text):
+                return await self._finish(
+                    client,
+                    message.text,
+                    BotReply(
+                        PRICE_LIST_CHAT_REPLY,
+                        delay=False,
+                        attachment_content=generated_price_list(),
+                        attachment_filename=PRICE_LIST_FILENAME,
+                    ),
+                    now,
+                )
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(FULL_ASSORTMENT_EMAIL_OFFER, delay=False),
                 now,
             )
         if self._is_fulfillment_turn(client, text):

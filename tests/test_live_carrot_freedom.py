@@ -153,9 +153,12 @@ async def test_live_vsya_is_assortment_not_no_match(now, message):
     _assert_not_fallback(result.text)
     assert saved.product != "Вся"
     assert saved.catalog_no_match_query is None
-    assert ai.catalog_calls
-    assert "CATALOG_RESULT_EMPTY" not in ai.catalog_calls[0]
-    assert "Доступные категории" in ai.catalog_calls[0] or "бакале" in result.text.lower()
+    assert saved.volume is None
+    assert saved.price_list_requested is True
+    assert result.attachment_content is None
+    assert "почт" in result.text.lower()
+    assert "прайс" in result.text.lower()
+    assert not ai.catalog_calls
 
 
 @pytest.mark.asyncio

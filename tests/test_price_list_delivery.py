@@ -211,8 +211,8 @@ async def test_email_after_plain_price_request_is_saved_and_does_not_claim_send(
     assert saved.price_list_requested is True
     assert PRODUCT_QUESTION not in second.text
     assert second.attachment_content is None
-    assert "отправ" not in second.text.lower()
-    assert "почт" not in second.text.lower() or "записал" in second.text.lower()
+    assert second.text == "Ок, почту записал. Вам отправят актуальный прайс."
+    assert "я отправил" not in second.text.lower()
 
 
 @pytest.mark.asyncio
