@@ -53,13 +53,11 @@
 
 ## Проверка
 
-- На 2026-08-27 (TDD: розничные stub вместо брендов конкурентов; packing/brand отвечают, не только объём; followup после PRICE_LIST_EMAIL_ACK с jitter 55–66 мин; без push/deploy/commit):
-- `PYTHONPATH=src .venv/bin/pytest` — `571 passed`.
-- `ruff check .` / `ruff format --check .` / `git diff --check` — чисто.
-- Пуш и деплой **не** выполнялись. CRM не трогали. Working tree оставлен родителю.
-- Сравнение: «…890 ₽… В обычных сетевых магазинах такая фасовка доходит до 990 ₽.»
-- «крупяной берег у вас есть?» → «Этой марки нет. У нас гречка ядрица Золотое Поле…»; «а какая фасовка?» → `10 x 800 г`.
-- Ack прайса на почту ставит `followup_due_at` в [55, 66] мин; следующее сообщение клиента снимает; planner exception не гасит due.
+- На 2026-08-27 production deploy `b685fa3` / `stable-production-b685fa3`:
+- GitHub `main` запушен. Пакет `--reinstall` в site-packages: `line_total_quote("яблоки","20 кг")=1640 ₽`, конкуренты = «розничные сети» (30 stub), сравнение «доходит до 810 ₽» без Крупяной, прайс 30 SKU без розницы.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T10:34:35Z, pid 308701. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 15 REMAINING 0.
+- Живой ход после рестарта: написать боту `/start` заново.
 
 - На 2026-08-27 production deploy `805a96a` / `stable-production-805a96a`:
 - GitHub `main` уже был на этом SHA. Пакет `--reinstall` в `/opt/stokozavr-telegram-bot/venv` site-packages, `line_total_quote("яблоки","20 кг")=1640 ₽`, `wants_full_assortment("все категории")=True`, прайс 30 SKU.
