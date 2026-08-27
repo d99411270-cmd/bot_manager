@@ -256,6 +256,18 @@ _FULL_ASSORTMENT_FILLERS = frozenset(
         "есть",
         "имеется",
         "что",
+        "дык",
+        "дак",
+        "ну",
+        "блин",
+        "короче",
+        "типа",
+        "ваще",
+        "вообще",
+        "вот",
+        "же",
+        "ведь",
+        "так",
     }
 )
 
@@ -1167,6 +1179,13 @@ def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
     if not value:
         return None
     cleaned = value.strip()
+    cleaned = re.sub(
+        r"^(?:привет|прив|здравствуй\w*|здрасте|добрый(?:\s+день)?)\b[\s,.!:;]*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"^(?:меня зовут|меня звать|я\s+|это\s+)\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" .!,")
     if not cleaned or any(ch.isdigit() for ch in cleaned):
@@ -1190,11 +1209,15 @@ def _is_person_name_value(text: str) -> bool:
         return False
     if looks_like_ready_to_buy(stripped) or looks_like_refusal(stripped):
         return False
-    if extract_volume(stripped) or _is_catalog_or_price_question(stripped):
+    parsed = parse_person_name(stripped)
+    check = stripped
+    if parsed:
+        check = parsed[0] if not parsed[1] else f"{parsed[0]} {parsed[1]}"
+    if extract_volume(check) or _is_catalog_or_price_question(check):
         return False
-    if phone_digit_attempt(stripped) or normalize_phone(stripped):
+    if phone_digit_attempt(check) or normalize_phone(check):
         return False
-    return not _catalog_has_positions(search(stripped))
+    return not bool(_utterance_search_key(check))
 
 
 def _may_write_commercial_facts(client: ClientProfile) -> bool:
@@ -1288,6 +1311,14 @@ def _confirmed_calculation_totals(catalog_result: str | None) -> set[str]:
             token = re.sub(r"\s+", "", raw)
             if token:
                 totals.add(token)
+    for raw in re.findall(
+        r"(\d+(?:[.,]\d+)?)\s*₽\s*/\s*(?:л|кг|шт)",
+        catalog_result,
+        re.IGNORECASE,
+    ):
+        token = raw.replace(",", ".")
+        totals.add(token)
+        totals.add(token.replace(".", ","))
     return totals
 
 
@@ -1309,6 +1340,20 @@ def _reply_includes_quote_amounts(
         return True
     compact = re.sub(r"\s+", "", reply)
     return any(token in compact for token in _quote_total_tokens(quote))
+
+
+def _reply_includes_unit_price(reply: str, quote: UnitPriceQuote | None) -> bool:
+    if quote is None:
+        return True
+    match = re.search(r"(\d+(?:[.,]\d+)?)", quote.unit_price)
+    if not match:
+        return False
+    token = match.group(1)
+    compact = re.sub(r"\s+", "", reply)
+    return any(
+        candidate in compact
+        for candidate in {token, token.replace(".", ","), token.replace(",", ".")}
+    )
 
 
 def _asks_about_confirmed_total(text: str) -> bool:
@@ -1520,13 +1565,15 @@ def _mark_catalog_result_empty(result: str | None) -> str:
 
 
 def _remember_catalog_no_match(client: ClientProfile, query: str | None) -> None:
+    identity_slot = requested_identity_slot(client)
     if query:
         client.catalog_no_match_query = query[:300]
         if client.product == query:
             client.product = None
         if client.current_interest == query:
             client.current_interest = None
-    client.status = "уточнение продукта"
+    if identity_slot not in {"phone", "email"}:
+        client.status = "уточнение продукта"
     client.needs_human = False
     client.pending_manager_question = None
 
@@ -1709,6 +1756,18 @@ def _is_anaphoric_followup(text: str) -> bool:
     return bool(re.search(r"\bфасовк\w*|\bупаковк\w*", cleaned.lower()))
 
 
+def _product_mentioned_in_text(product: str, text: str) -> bool:
+    """True when the user text names this intake product, not a guessed JSON field."""
+    prod = (product or "").lower().replace("ё", "е")
+    hay = (text or "").lower().replace("ё", "е")
+    if not prod or not hay:
+        return False
+    if prod in hay:
+        return True
+    tokens = [token for token in re.findall(r"[а-яa-z0-9-]{3,}", prod) if token]
+    return bool(tokens) and all(token in hay for token in tokens)
+
+
 def resolve_catalog_query(
     text: str,
     semantic: IntakeAnalysis | None,
@@ -1736,9 +1795,11 @@ def resolve_catalog_query(
         semantic_product = None
     if (
         semantic_product
-        and requested_identity_slot(client) not in {"phone", "email"}
-        and not _is_referential_followup(text)
+        and requested_identity_slot(client) in {"phone", "email"}
+        and not _product_mentioned_in_text(semantic_product, text)
     ):
+        semantic_product = None
+    if semantic_product and not _is_referential_followup(text):
         if _asks_unknown_brand(text) and (client.current_interest or client.product):
             topic = client.current_interest or client.product
             return topic, "interest"
@@ -2397,6 +2458,17 @@ class ConversationService:
                 composite_quote,
             )
 
+        if unit_quote or line_quote or composite_quote:
+            return await self._handle_ai(
+                client,
+                message.text,
+                now,
+                catalog_result,
+                unit_quote,
+                line_quote,
+                composite_quote,
+            )
+
         if (
             captured
             and semantic
@@ -2433,6 +2505,13 @@ class ConversationService:
             and turn
             and rejection_reason is None
             and not _reply_includes_quote_amounts(turn.reply, line_quote)
+        ):
+            rejection_reason = "invalid_reply"
+        if (
+            unit_quote
+            and turn
+            and rejection_reason is None
+            and not _reply_includes_unit_price(turn.reply, unit_quote)
         ):
             rejection_reason = "invalid_reply"
         if rejection_reason is None and turn is not None:
@@ -2600,11 +2679,12 @@ class ConversationService:
         captured = False
         intent = semantic.intent if semantic else None
         parsed = None
-        if intent in _CAPTURE_INTENTS:
+        name_slot = requested_identity_slot(client) == "name"
+        if intent in _CAPTURE_INTENTS or (name_slot and intent == "greeting"):
             name_source = semantic.name if semantic and semantic.name else None
             if name_source:
                 parsed = parse_person_name(name_source)
-            elif requested_identity_slot(client) == "name":
+            elif name_slot:
                 parsed = parse_person_name(text)
             candidate = name_source or text
             if parsed and not _is_person_name_value(candidate):
@@ -2954,6 +3034,13 @@ class ConversationService:
             and not _reply_includes_quote_amounts(turn.reply, line_quote)
         ):
             rejection_reason = "invalid_reply"
+        if (
+            unit_quote
+            and turn
+            and rejection_reason is None
+            and not _reply_includes_unit_price(turn.reply, unit_quote)
+        ):
+            rejection_reason = "invalid_reply"
         if rejection_reason is not None:
             if (
                 turn
@@ -2977,6 +3064,8 @@ class ConversationService:
                 repair_reason is None
                 and repair is not None
                 and _repair_reply_is_grounded(repair.reply, catalog_result or "")
+                and _reply_includes_unit_price(repair.reply, unit_quote)
+                and _reply_includes_quote_amounts(repair.reply, line_quote)
             ):
                 return await self._finish(
                     client,
@@ -2997,6 +3086,8 @@ class ConversationService:
             if (
                 open_turn
                 and _reject_turn(open_turn, catalog_result, client, user_text=user_message) is None
+                and _reply_includes_unit_price(open_turn.reply, unit_quote)
+                and _reply_includes_quote_amounts(open_turn.reply, line_quote)
             ):
                 if not catalog_no_match:
                     self._apply_turn_facts(client, open_turn, user_message)
@@ -3234,8 +3325,16 @@ class ConversationService:
         now: datetime,
     ) -> BotReply:
         apply_followup_rules(client, user_message, reply.text, now, rng=self.followup_rng)
+        text = reply.text
+        append_fork = self._should_append_price_consult(client, user_message, reply)
+        if append_fork:
+            dropped = _drop_questions(text)
+            if dropped:
+                text = dropped
+            else:
+                append_fork = False
         text = ensure_unsolicited_linked_competitor(
-            client, user_message, reply.text, self._turn_catalog_result
+            client, user_message, text, self._turn_catalog_result
         )
         safe_text = limit_competitor_mentions(
             client,
@@ -3244,6 +3343,9 @@ class ConversationService:
                 client, user_message, text, self._turn_catalog_result
             ),
         )
+        if append_fork:
+            _mark_price_consult_offered(client)
+            safe_text = f"{safe_text} {PRICE_CONSULT_FORK}".strip()
         reply = BotReply(
             safe_text,
             request_contact=reply.request_contact,
@@ -3251,17 +3353,6 @@ class ConversationService:
             attachment_content=reply.attachment_content,
             attachment_filename=reply.attachment_filename,
         )
-        if self._should_append_price_consult(client, user_message, reply):
-            answer = _drop_questions(reply.text)
-            if answer:
-                _mark_price_consult_offered(client)
-                reply = BotReply(
-                    f"{answer} {PRICE_CONSULT_FORK}".strip(),
-                    request_contact=reply.request_contact,
-                    delay=reply.delay,
-                    attachment_content=reply.attachment_content,
-                    attachment_filename=reply.attachment_filename,
-                )
         if (
             reply_quoted_price(reply.text)
             and client.status != "готов к заказу"

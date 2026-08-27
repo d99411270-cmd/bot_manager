@@ -63,6 +63,34 @@ def test_parse_person_name_maps_diminutives_to_official(raw, official):
     assert parsed[1] is None
 
 
+@pytest.mark.parametrize(
+    ("raw", "official"),
+    [
+        ("прив я ванек", "Иван"),
+        ("привет я ванек", "Иван"),
+        ("я ванек", "Иван"),
+        ("здрасте я ванек", "Иван"),
+        ("здравствуйте я ванек", "Иван"),
+        ("добрый день я ванек", "Иван"),
+        ("добрый я ванек", "Иван"),
+        ("Прив я Ванёк", "Иван"),
+    ],
+)
+def test_parse_person_name_strips_leading_greeting_then_maps_nickname(raw, official):
+    parsed = parse_person_name(raw)
+    assert parsed is not None
+    assert parsed[0] == official
+    assert parsed[1] is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["прив", "привет", "здрасте", "здравствуйте", "добрый день", "добрый"],
+)
+def test_parse_person_name_rejects_bare_greetings(raw):
+    assert parse_person_name(raw) is None
+
+
 @pytest.mark.asyncio
 async def test_bot_addresses_first_name_and_keeps_last_name(now):
     repo = InMemoryCRMRepository()
@@ -263,3 +291,32 @@ async def test_sergey_is_unchanged_on_capture(now):
 
     assert saved is not None
     assert saved.name == "Сергей"
+
+
+@pytest.mark.asyncio
+async def test_priv_ya_vanek_first_turn_stores_ivan_not_vanek(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(83, None, "прив я ванек"))
+    saved = await repo.get_client(83)
+
+    assert saved is not None
+    assert saved.name == "Иван"
+    assert "Иван" in result.text
+    assert "Ванек" not in result.text
+    assert "Ванёк" not in result.text
+    assert PHONE_QUESTION in result.text
+
+
+@pytest.mark.asyncio
+async def test_sveta_persists_on_name_slot_even_if_intent_is_greeting(now):
+    repo = InMemoryCRMRepository()
+    ai = SemanticAI([IntakeAnalysis(intent="greeting")])
+    service = ConversationService(repo, ai, clock=lambda: now)
+
+    await service.handle(IncomingMessage(90, None, "света"))
+    saved = await repo.get_client(90)
+
+    assert saved is not None
+    assert saved.name == "Света"

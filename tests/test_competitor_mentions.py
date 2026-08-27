@@ -4,7 +4,11 @@ import pytest
 
 from stokozavr_bot.models import AiTurn, ClientProfile, IncomingMessage, IntakeAnalysis
 from stokozavr_bot.repositories import InMemoryCRMRepository
-from stokozavr_bot.service import ConversationService, limit_competitor_mentions
+from stokozavr_bot.service import (
+    PRICE_CONSULT_FORK,
+    ConversationService,
+    limit_competitor_mentions,
+)
 
 DEAD_COMPETITOR_BRANDS = (
     "росинка",
@@ -414,4 +418,38 @@ async def test_catalog_dump_retail_comparison_increments_counter(now):
 
     assert "990" in result.text
     assert not _has_dead_brand(result.text)
+    assert saved.competitor_mentions == 1
+
+
+def _fresh_named_client(telegram_id: int) -> ClientProfile:
+    return ClientProfile(
+        telegram_id=telegram_id,
+        name="Дима",
+        contact_skipped=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_sku_quote_keeps_retail_when_price_consult_fork_appended(now):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(_fresh_named_client(2100000120))
+    ai = ScriptedCatalogAI(
+        ["Да, гречка ядрица Золотое Поле, 730 ₽ за 10 x 800 г. Какой объём берёте?"]
+    )
+
+    result = await ConversationService(repo, ai, clock=lambda: now).handle(
+        IncomingMessage(2100000120, None, "гречка есть?")
+    )
+    saved = await repo.get_client(2100000120)
+    lowered = result.text.lower()
+
+    assert "730" in result.text
+    assert "810" in result.text
+    assert "сетев" in lowered or "розничн" in lowered
+    assert PRICE_CONSULT_FORK in result.text
+    assert result.text.strip() != PRICE_CONSULT_FORK
+    assert "крупяной" not in lowered
+    assert "какой объём" not in lowered
+    assert result.text.count("?") == 1
+    assert saved.comment and "Прайс-консультация предложена" in saved.comment
     assert saved.competitor_mentions == 1

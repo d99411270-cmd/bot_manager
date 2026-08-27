@@ -80,6 +80,13 @@ def _dima(telegram_id: int = 679025492) -> ClientProfile:
         "продовольствие",
         "питание",
         "интересует еда",
+        "дык еда",
+        "ну еда",
+        "вообще продукты питания",
+        "блин еда",
+        "короче еда",
+        "типа еда",
+        "ваще еда",
     ],
 )
 def test_wants_full_assortment_covers_live_phrases_and_paraphrases(text):
