@@ -25,6 +25,7 @@ CLIENT_HEADERS = [
 HISTORY_HEADERS = ["дата", "telegram_id", "сообщение клиента", "ответ Ивана"]
 CATALOG_NO_MATCH_MARKER = "Товар не найден: "
 INTERESTS_MARKER = "Интересы:"
+PAUSE_VOLUME_MARKER = "Не спрашивать объём"
 
 
 class GoogleSheetsCRMRepository:
@@ -142,6 +143,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
     price_list_requested, price_list_sent_at, extra = _split_price_list_state(extra)
     catalog_no_match_query, extra = _split_catalog_no_match(extra)
     original_interests, current_interest, extra = _split_interests(extra)
+    pause_volume_prompt, extra = _split_pause_volume(extra)
     return ClientProfile(
         telegram_id=telegram_id,
         username=_text(row.get("username")),
@@ -166,6 +168,7 @@ def _client_from_row(row: dict[str, object], telegram_id: int) -> ClientProfile:
         price_list_requested=price_list_requested,
         price_list_sent_at=price_list_sent_at,
         catalog_no_match_query=catalog_no_match_query,
+        pause_volume_prompt=pause_volume_prompt,
     )
 
 
@@ -245,6 +248,17 @@ def _split_catalog_no_match(extra: str) -> tuple[str | None, str]:
     return query, " | ".join(kept)
 
 
+def _split_pause_volume(extra: str) -> tuple[bool, str]:
+    paused = False
+    kept: list[str] = []
+    for part in [item.strip() for item in extra.split(" | ") if item.strip()]:
+        if part == PAUSE_VOLUME_MARKER:
+            paused = True
+        else:
+            kept.append(part)
+    return paused, " | ".join(kept)
+
+
 def _split_interests(extra: str) -> tuple[list[str] | None, str | None, str]:
     original: list[str] | None = None
     current: str | None = None
@@ -318,6 +332,8 @@ def _build_comment(client: ClientProfile) -> str:
         parts.append(f"Прайс отправлен: {client.price_list_sent_at.isoformat()}")
     if client.needs_human:
         parts.append("Нужен менеджер")
+    if client.pause_volume_prompt:
+        parts.append(PAUSE_VOLUME_MARKER)
     encoded_interests = _encode_interests(client.original_interests, client.current_interest)
     if encoded_interests:
         parts.append(encoded_interests)
@@ -328,6 +344,7 @@ def _build_comment(client: ClientProfile) -> str:
     extra = _split_price_list_state(extra)[2]
     extra = _split_catalog_no_match(extra)[1]
     extra = _split_interests(extra)[2]
+    extra = _split_pause_volume(extra)[1]
     if client.last_name:
         parts.append(f"Фамилия: {client.last_name}")
     if client.budget is not None:

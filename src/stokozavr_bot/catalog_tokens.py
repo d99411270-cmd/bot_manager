@@ -133,12 +133,16 @@ def term_matches_haystack(term: str, haystack: str) -> bool:
 
 _FRESH_PREFIXES = ("свеж",)
 _PRESERVED_PREFIXES = ("маринован", "солен", "квашен", "консервир")
+_JAR_STEMS = frozenset({"банк"})
+_JAR_TOKENS = frozenset({"банок"})
 _FRESH_CATEGORIES = frozenset({"овощи", "фрукты"})
 
 
 def _token_process(token: str) -> str | None:
     raw = normalize_catalog_token(token)
     stem = stem_catalog_token(token)
+    if stem in _JAR_STEMS or raw in _JAR_TOKENS:
+        return "preserved"
     if any(raw.startswith(prefix) or stem.startswith(prefix) for prefix in _PRESERVED_PREFIXES):
         return "preserved"
     if any(raw.startswith(prefix) or stem.startswith(prefix) for prefix in _FRESH_PREFIXES):

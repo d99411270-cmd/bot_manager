@@ -38,7 +38,7 @@ def missing_fields(profile: ClientProfile) -> list[str]:
         missing.append("phone")
     if not profile.product:
         missing.append("product")
-    if not profile.volume:
+    if not profile.volume and not profile.pause_volume_prompt:
         missing.append("volume")
     return missing
 

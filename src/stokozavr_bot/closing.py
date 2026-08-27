@@ -45,6 +45,11 @@ def looks_like_call_time(text: str) -> bool:
     )
 
 
+def asks_about_time_slot(text: str) -> bool:
+    lowered = text.strip().lower()
+    return bool(re.search(r"во сколько|на какое время|когда (?:звон|приез|удобн)", lowered))
+
+
 def looks_like_pickup_question(text: str) -> bool:
     lowered = text.strip().lower()
     if "самовывоз" not in lowered:

@@ -268,3 +268,27 @@ async def test_google_sheets_repository_appends_and_limits_history():
 
     assert book.sheets["История сообщений"].rows[0] == HISTORY_HEADERS
     assert [item.user_message for item in history] == ["q1", "q2"]
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_roundtrips_pause_volume_prompt():
+    book = FakeBook()
+    repo = GoogleSheetsCRMRepository(book)
+    now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=75,
+            name="Таня",
+            product="морковь",
+            current_interest="морковь",
+            pause_volume_prompt=True,
+            first_contact_at=now,
+            last_contact_at=now,
+        )
+    )
+    loaded = await repo.get_client(75)
+    assert loaded is not None
+    assert loaded.pause_volume_prompt is True
+    comment = book.sheets["Клиенты"].rows[1][-1]
+    assert "Не спрашивать объём" in comment
+    assert comment.count("Не спрашивать объём") == 1

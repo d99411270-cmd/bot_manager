@@ -37,6 +37,7 @@ class ClientProfile:
     fulfillment_channel: str | None = None
     requested_slot: str | None = None
     handoff_id: str | None = None
+    pause_volume_prompt: bool = False
 
 
 @dataclass(slots=True)
