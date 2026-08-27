@@ -210,7 +210,7 @@ def _is_known_stock_followup(text: str, catalog_result: str | None) -> bool:
 
 
 _FULL_ASSORTMENT_UNIVERSAL = frozenset({"вся", "все", "весь", "всю"})
-_FULL_ASSORTMENT_CATALOG_STEMS = ("продукт", "категор", "ассортимент", "товар")
+_FULL_ASSORTMENT_CATALOG_STEMS = ("продукт", "продукц", "категор", "ассортимент", "товар")
 _FULL_ASSORTMENT_FOOD_HYPERNYMS = frozenset({"еда", "еду", "еде"})
 _FULL_ASSORTMENT_FOOD_HYPERNYM_STEMS = ("продукт", "питани", "продовольств", "пищев")
 _FULL_ASSORTMENT_FILLERS = frozenset(
@@ -253,6 +253,8 @@ _FULL_ASSORTMENT_FILLERS = frozenset(
         "нужно",
         "интересует",
         "интересуют",
+        "интересно",
+        "целом",
         "есть",
         "имеется",
         "что",
@@ -306,6 +308,32 @@ def _asked_occupation(question: str | None) -> bool:
             question.lower(),
         )
     )
+
+
+def _asked_product_interest(question: str | None) -> bool:
+    """True when Ivan asked which product the client wants."""
+    if not question:
+        return False
+    lowered = question.lower()
+    if PRODUCT_QUESTION.lower() in lowered:
+        return True
+    return bool(re.search(r"какая продукция вас|что вас сейчас интересует", lowered))
+
+
+def _should_offer_full_assortment_price_list(
+    client: ClientProfile,
+    text: str,
+    semantic: IntakeAnalysis | None,
+    last_question: str | None,
+) -> bool:
+    """Vague or whole-catalog answer to the product-interest question → price-list email."""
+    if requested_identity_slot(client) in {"phone", "email"}:
+        return False
+    if not _asked_product_interest(last_question):
+        return False
+    if wants_full_assortment(text):
+        return True
+    return bool(semantic and semantic.vague_interest)
 
 
 def _is_client_type_answer(text: str) -> bool:
@@ -1144,6 +1172,7 @@ _DIMINUTIVE_FIRST_NAMES = {
     "ваня": "Иван",
     "ванька": "Иван",
     "диман": "Дмитрий",
+    "димас": "Дмитрий",
     "димон": "Дмитрий",
     "дима": "Дмитрий",
     "димка": "Дмитрий",
@@ -1200,6 +1229,29 @@ def parse_person_name(value: str | None) -> tuple[str, str | None] | None:
     first = _official_first_name(parts[0])
     last = " ".join(parts[1:]) or None
     return first, last
+
+
+def _strip_repeated_vocative(text: str, name: str | None, previous_assistant: str | None) -> str:
+    """Drop a leading '{name}, ' if the previous bot turn already used the name."""
+    if not name or not text:
+        return text
+    if text.startswith(f"Очень приятно, {name}"):
+        return text
+    if text.startswith(f"Спасибо, {name}"):
+        return text
+    if text.startswith(f"Здравствуйте, {name}"):
+        return text
+    if text.startswith(f"{name}, ранее вы интересовались"):
+        return text
+    if not previous_assistant or name not in previous_assistant:
+        return text
+    for prefix in (f"{name}, ", f"{name} "):
+        if text.startswith(prefix):
+            rest = text[len(prefix) :]
+            if rest and rest[0].islower():
+                return rest[0].upper() + rest[1:]
+            return rest
+    return text
 
 
 def _is_person_name_value(text: str) -> bool:
@@ -1386,10 +1438,9 @@ def _is_quantity_only_phrase(text: str) -> bool:
 
 
 def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> str:
-    prefix = f"{name}, " if name else ""
     record = quote.record
     reply = (
-        f"{prefix}{quote.human_line} "
+        f"{quote.human_line} "
         f"({record.price} за {record.packaging}; производитель — {record.manufacturer})"
     )
     piece_unit = {"банка": "шт", "бутылка": "шт", "шт": "шт"}.get(quote.requested_unit)
@@ -1401,10 +1452,9 @@ def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> 
 
 
 def _format_nearest_pack_reply(quote: NearestPackQuote, name: str | None = None) -> str:
-    prefix = f"{name}, " if name else ""
     record = quote.record
     return (
-        f"{prefix}{quote.human_line} "
+        f"{quote.human_line} "
         f"({record.price} за {record.packaging}; производитель — {record.manufacturer})."
     )
 
@@ -1418,9 +1468,8 @@ def _format_grounded_quote_reply(
 
 
 def _format_composite_reply(combined: CompositeLineTotals, name: str | None = None) -> str:
-    prefix = f"{name}, " if name else ""
     lines = "; ".join(quote.human_line for quote in combined.lines)
-    return f"{prefix}{lines}. Итого {combined.total_amount} ₽."
+    return f"{lines}. Итого {combined.total_amount} ₽."
 
 
 def _requested_quote_quantity(
@@ -2230,6 +2279,7 @@ class ConversationService:
                 invalid_phone_length=invalid_phone[0],
                 invalid_phone_direction=invalid_phone[1],
                 reply=semantic.reply,
+                vague_interest=semantic.vague_interest,
             )
         if invalid_phone:
             direction = invalid_phone[1]
@@ -2246,11 +2296,23 @@ class ConversationService:
                 BotReply(f"Кажется, {wording}. Пришлите, пожалуйста, номер ещё раз."),
                 now,
             )
+        last_question = history[-1].assistant_message if history else None
+        if _should_offer_full_assortment_price_list(client, text, semantic, last_question):
+            client.price_list_requested = True
+            _mark_price_consult_offered(client)
+            if client.name and not has_contact(client):
+                client.status = "ожидает почту"
+            return await self._finish(
+                client,
+                message.text,
+                BotReply(FULL_ASSORTMENT_EMAIL_OFFER, delay=False),
+                now,
+            )
         catalog_query, query_owner = resolve_catalog_query(
             text,
             semantic,
             client,
-            last_question=history[-1].assistant_message if history else None,
+            last_question=last_question,
         )
         preliminary_catalog_result = None
         catalog_no_match = False
@@ -3346,6 +3408,9 @@ class ConversationService:
         if append_fork:
             _mark_price_consult_offered(client)
             safe_text = f"{safe_text} {PRICE_CONSULT_FORK}".strip()
+        history = await self.repository.get_history(client.telegram_id, 1)
+        previous = history[-1].assistant_message if history else None
+        safe_text = _strip_repeated_vocative(safe_text, client.name, previous)
         reply = BotReply(
             safe_text,
             request_contact=reply.request_contact,

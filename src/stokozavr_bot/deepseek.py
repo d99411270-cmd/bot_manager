@@ -66,9 +66,12 @@ INTAKE_SYSTEM_PROMPT = (
 «отдельно» (в том числе с опечаткой «еденицу») классифицируй как question и заполняй
 unit_price_request единицей (кг, л или шт), а конкретный товар из истории/сообщения — в target_product.
 Если введён телефоноподобный номер с 10 или 12 цифрами, заполни invalid_phone_length длиной и
-invalid_phone_direction как short или long; для обычного текста эти поля null. Верни только JSON строго такого вида:
+invalid_phone_direction как short или long; для обычного текста эти поля null.
+После вопроса про интересующую продукцию общие/размытые ответы («в целом», «пока не знаю что брать»,
+«разное», «посмотрим») → vague_interest true и product null. Иначе vague_interest false.
+Верни только JSON строго такого вида:
 {"intent":"provide_data|refusal|question|greeting|offtopic|correction",
-"entities":{"name":str|null,"phone":str|null,"product":str|null,"target_product":str|null,"volume":str|null,"budget":int|null,"unit_price_request":"кг|л|шт"|null,"invalid_phone_length":int|null,"invalid_phone_direction":"short|long"|null},
+"entities":{"name":str|null,"phone":str|null,"product":str|null,"target_product":str|null,"volume":str|null,"budget":int|null,"unit_price_request":"кг|л|шт"|null,"invalid_phone_length":int|null,"invalid_phone_direction":"short|long"|null,"vague_interest":bool},
 "reply":str|null}.
 refusal — пользователь отказывается сообщить запрошенное; question — задаёт вопрос; correction —
 явно исправляет ранее сообщённое. reply — необязательная короткая естественная реакция без цен,
@@ -377,6 +380,7 @@ class DeepSeekClient:
             invalid_phone_length=entities.get("invalid_phone_length"),
             invalid_phone_direction=_clean_optional(entities.get("invalid_phone_direction")),
             reply=_clean_optional(data["reply"]),
+            vague_interest=bool(entities.get("vague_interest") or False),
         )
 
     async def plan_followup(
@@ -564,8 +568,11 @@ def _validate_intake_result(data: object) -> None:
         "unit_price_request",
         "invalid_phone_length",
         "invalid_phone_direction",
+        "vague_interest",
     ):
         entities.setdefault(key, None)
+    if entities.get("vague_interest") is None:
+        entities["vague_interest"] = False
     if set(entities) != {
         "name",
         "phone",
@@ -576,6 +583,7 @@ def _validate_intake_result(data: object) -> None:
         "unit_price_request",
         "invalid_phone_length",
         "invalid_phone_direction",
+        "vague_interest",
     }:
         raise ValueError("DeepSeek intake JSON содержит неверные entities")
     if entities["unit_price_request"] not in {None, "кг", "л", "шт"}:
@@ -587,12 +595,16 @@ def _validate_intake_result(data: object) -> None:
         raise ValueError("DeepSeek intake JSON: invalid_phone_length имеет неверное значение")
     if entities["invalid_phone_direction"] not in {None, "short", "long"}:
         raise ValueError("DeepSeek intake JSON: invalid_phone_direction имеет неверное значение")
+    if type(entities["vague_interest"]) is not bool:
+        raise TypeError("DeepSeek intake JSON: vague_interest должен быть boolean")
     for key, value in entities.items():
         if key == "budget" or key == "invalid_phone_length":
             if key == "budget" and value is not None and (type(value) is not int or value <= 0):
                 raise TypeError("DeepSeek intake JSON: budget имеет неверный тип")
             if key == "invalid_phone_length" and value is not None and type(value) is not int:
                 raise TypeError("DeepSeek intake JSON: invalid_phone_length имеет неверный тип")
+        elif key == "vague_interest":
+            continue
         elif value is not None and not isinstance(value, str):
             raise TypeError(f"DeepSeek intake JSON: {key} должен быть строкой или null")
     if data["reply"] is not None and not isinstance(data["reply"], str):

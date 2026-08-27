@@ -86,6 +86,7 @@ class IntakeAnalysis:
     invalid_phone_length: int | None = None
     invalid_phone_direction: str | None = None
     reply: str | None = None
+    vague_interest: bool = False
 
 
 @dataclass(slots=True, frozen=True)

@@ -35,6 +35,19 @@ class SemanticAI:
         raise RuntimeError("no respond")
 
 
+class RepeatingNameAI:
+    async def analyze_intake(self, profile, history, message):
+        return IntakeAnalysis(intent="provide_data")
+
+    async def respond(self, profile, history, message):
+        name = profile.name or "клиент"
+        return AiTurn(reply=f"{name}, в Стокозавре морковь 410 ₽ за мешок 10 кг. Берёте?")
+
+    async def respond_with_catalog(self, profile, history, message, catalog_result):
+        name = profile.name or "клиент"
+        return AiTurn(reply=f"{name}, в Стокозавре морковь 410 ₽ за мешок 10 кг. Берёте?")
+
+
 def test_parse_full_name():
     assert parse_person_name("Сергей Иванов") == ("Сергей", "Иванов")
     assert parse_person_name("Меня зовут Анна Петрова") == ("Анна", "Петрова")
@@ -53,7 +66,9 @@ def test_parse_full_name():
         ("Димон", "Дмитрий"),
         ("дима", "Дмитрий"),
         ("Димка", "Дмитрий"),
+        ("Димас", "Дмитрий"),
         ("Сергей", "Сергей"),
+        ("Саша", "Саша"),
     ],
 )
 def test_parse_person_name_maps_diminutives_to_official(raw, official):
@@ -279,6 +294,51 @@ async def test_diman_is_stored_as_dmitry(now):
     assert saved.name == "Дмитрий"
     assert "Дмитрий" in result.text
     assert "Диман" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_dimas_is_stored_as_dmitry_not_dimas(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(84, None, "Димас"))
+    saved = await repo.get_client(84)
+
+    assert saved is not None
+    assert saved.name == "Дмитрий"
+    assert "Дмитрий" in result.text
+    assert "Димас" not in result.text
+    assert PHONE_QUESTION in result.text
+
+
+@pytest.mark.asyncio
+async def test_sasha_stays_unmapped(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, SemanticAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(85, None, "Саша"))
+    saved = await repo.get_client(85)
+
+    assert saved is not None
+    assert saved.name == "Саша"
+    assert "Саша" in result.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_reply_does_not_repeat_name_after_phone_already_used_it(now):
+    repo = InMemoryCRMRepository()
+    service = ConversationService(repo, RepeatingNameAI(), clock=lambda: now)
+
+    named = await service.handle(IncomingMessage(86, None, "Анна"))
+    phone = await service.handle(IncomingMessage(86, None, "+7 999 123-45-67"))
+    catalog = await service.handle(IncomingMessage(86, None, "морковь"))
+
+    assert named.text.startswith("Очень приятно, Анна")
+    assert phone.text.startswith("Спасибо, Анна")
+    assert PHONE_QUESTION in named.text
+    assert "Анна" in phone.text
+    assert not catalog.text.startswith("Анна")
+    assert "морков" in catalog.text.lower() or "410" in catalog.text
 
 
 @pytest.mark.asyncio

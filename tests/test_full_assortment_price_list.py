@@ -9,6 +9,7 @@ from stokozavr_bot.service import (
     CATALOG_NO_MATCH_REPLY,
     EMAIL_QUESTION,
     FULL_ASSORTMENT_EMAIL_OFFER,
+    PHONE_QUESTION,
     PRODUCT_QUESTION,
     ConversationService,
     wants_full_assortment,
@@ -43,6 +44,17 @@ class BrowseAI:
 
     async def respond_with_catalog(self, profile, history, message, catalog_result):
         return AiTurn(reply="Из овощей: морковь, картофель, лук, огурцы. Что берёте?")
+
+
+class VagueInterestAI:
+    async def analyze_intake(self, profile, history, message):
+        return IntakeAnalysis(intent="provide_data", vague_interest=True)
+
+    async def respond(self, profile, history, message):
+        raise AssertionError("vague interest must not call AI respond")
+
+    async def respond_with_catalog(self, profile, history, message, catalog_result):
+        raise AssertionError("vague interest must not call AI catalog")
 
 
 @pytest.fixture
@@ -87,6 +99,8 @@ def _dima(telegram_id: int = 679025492) -> ClientProfile:
         "короче еда",
         "типа еда",
         "ваще еда",
+        "вся продукция",
+        "В целом интересно вся продукция",
     ],
 )
 def test_wants_full_assortment_covers_live_phrases_and_paraphrases(text):
@@ -254,3 +268,63 @@ async def test_live_food_hypernyms_offer_price_list_not_catalog_no_match(now):
     assert saved.product not in {"еда", "продукты питания"}
     assert after_first.price_list_requested is True
     assert saved.price_list_requested is True
+
+
+@pytest.mark.asyncio
+async def test_whole_produktsiya_phrase_offers_price_list_email_not_category_dump(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(_dima(742))
+    await repository.append_history(742, now, "Дмитрий", PRODUCT_QUESTION)
+    service = ConversationService(repository, VolumeHungryAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(742, None, "В целом интересно вся продукция"))
+    saved = await repository.get_client(742)
+
+    assert result.text == FULL_ASSORTMENT_EMAIL_OFFER
+    assert result.attachment_content is None
+    assert result.attachment_filename is None
+    assert "какая категория" not in result.text.lower()
+    assert "категор" not in result.text.lower()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+    assert ConversationService.should_use_ai(saved, "В целом интересно вся продукция") is False
+
+
+@pytest.mark.asyncio
+async def test_vague_interest_after_product_question_offers_price_list_email(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(_dima(743))
+    await repository.append_history(743, now, "Дмитрий", PRODUCT_QUESTION)
+    service = ConversationService(repository, VagueInterestAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(743, None, "пока не знаю"))
+    saved = await repository.get_client(743)
+
+    assert result.text == FULL_ASSORTMENT_EMAIL_OFFER
+    assert result.attachment_content is None
+    assert result.attachment_filename is None
+    assert "какая категория" not in result.text.lower()
+    assert "категор" not in result.text.lower()
+    assert saved.price_list_requested is True
+    assert saved.price_list_sent_at is None
+
+
+@pytest.mark.asyncio
+async def test_vague_interest_does_not_fire_on_phone_slot(now):
+    repository = InMemoryCRMRepository()
+    await repository.save_client(
+        ClientProfile(
+            telegram_id=744,
+            name="Дмитрий",
+            status="ожидает телефон",
+        )
+    )
+    await repository.append_history(744, now, "Дмитрий", PHONE_QUESTION)
+    service = ConversationService(repository, VagueInterestAI(), clock=lambda: now)
+
+    result = await service.handle(IncomingMessage(744, None, "пока не знаю"))
+    saved = await repository.get_client(744)
+
+    assert result.text != FULL_ASSORTMENT_EMAIL_OFFER
+    assert saved.price_list_requested is False
+    assert saved.phone is None

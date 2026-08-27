@@ -546,3 +546,61 @@ async def test_intake_extracts_only_explicit_budget_as_semantic_fact():
 
     assert result.budget == 10000
     assert "зависит от цены" in captured["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_intake_omitted_vague_interest_defaults_false():
+    def handler(request: httpx.Request) -> httpx.Response:
+        result = {
+            "intent": "provide_data",
+            "entities": {
+                "name": None,
+                "phone": None,
+                "product": None,
+                "volume": None,
+                "budget": None,
+            },
+            "reply": None,
+        }
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await DeepSeekClient("key", client=http).analyze_intake(
+            ClientProfile(1), [], "пока не знаю"
+        )
+
+    assert result.vague_interest is False
+    assert result.product is None
+
+
+@pytest.mark.asyncio
+async def test_intake_parses_vague_interest_true_and_prompt_explains_it():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        result = {
+            "intent": "provide_data",
+            "entities": {
+                "name": None,
+                "phone": None,
+                "product": None,
+                "volume": None,
+                "budget": None,
+                "vague_interest": True,
+            },
+            "reply": None,
+        }
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await DeepSeekClient("key", client=http).analyze_intake(
+            ClientProfile(1), [], "пока не знаю что брать"
+        )
+
+    assert result.vague_interest is True
+    assert result.product is None
+    prompt = captured["messages"][0]["content"].lower()
+    assert "vague_interest" in prompt
+    assert "в целом" in prompt
+    assert "пока не знаю" in prompt

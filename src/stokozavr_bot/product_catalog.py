@@ -531,7 +531,6 @@ def grounded_search_reply(
         )
     if not lines:
         return None
-    prefix = f"{name}, " if name else ""
     endings = (
         "Что из этого вам подходит?",
         "Какой из них посмотреть?",
@@ -540,7 +539,7 @@ def grounded_search_reply(
     ending = next(
         (item for item in endings if not previous_reply or item not in previous_reply), endings[0]
     )
-    return prefix + "В каталоге есть:\n- " + "\n- ".join(lines) + "\n" + ending
+    return "В каталоге есть:\n- " + "\n- ".join(lines) + "\n" + ending
 
 
 def grounded_quote_reply(
@@ -560,7 +559,6 @@ def grounded_quote_reply(
     if len(candidates) != 1:
         return None
     record = candidates[0]
-    prefix = f"{name}, " if name else ""
     endings = ("Самовывоз или доставка?", "Когда удобно забрать или нужна доставка?")
     ending = next(
         (item for item in endings if not previous_reply or item not in previous_reply), endings[0]
@@ -569,4 +567,4 @@ def grounded_quote_reply(
         f"{record.subcategory}: {record.price} за {record.packaging}; "
         f"производитель — {record.manufacturer}; сейчас {record.availability}."
     )
-    return f"{prefix}{line} {ending}"
+    return f"{line} {ending}"
