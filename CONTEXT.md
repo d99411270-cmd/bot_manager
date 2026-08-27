@@ -53,6 +53,12 @@
 
 ## Проверка
 
+- На 2026-08-27 production deploy `7b4f2fc` / `stable-production-7b4f2fc`:
+- GitHub `main` запушен. Site-packages: `resolve_catalog_query` на слоте телефона ищет «манго есть?» → semantic, `unit_price_quote(морс)=106.67 ₽/л`, яблоки 20 кг = 1640 ₽.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T16:15:07Z, pid 337444. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 0 REMAINING 0, История DELETED 0 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
+
 - На 2026-08-27 production deploy `427de1b` / `stable-production-427de1b`:
 - GitHub `main` запушен. Site-packages: «прайс есть?» → `PRICE_LIST_EMAIL_OFFER`, Ванёк→Иван, Диман→Дмитрий.
 - `Run polling for bot @Stokozavr_manager_bot` 2026-08-27T11:38:06Z, pid 312947. MAX и Xray остались `active`.
