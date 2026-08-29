@@ -55,6 +55,12 @@
 
 ## Проверка
 
+- На 2026-08-29 production deploy `c4ea317` / `stable-production-c4ea317`:
+- GitHub `main` запушен. Site-packages: морковь 50 кг = `410 ₽ за мешок 10 кг` без дубля; морс `106.67 ₽/л` / `640 ₽ за упаковку` один раз.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-29T05:09:05Z, pid 440924. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 12 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
+
 - На 2026-08-28 изолированный live QA R20 на Beget `/tmp/stokozavr-qa-round20` (код с фиксом дубля фасовки; production `/opt` и MAX **не** трогали, пуш/деплой **нет**). Три проблемных персоны, oracle из `qa-dialogues/round-20/p1.json` / `p4.json` / `p5.json`: морковь 41 ₽/кг и «410 ₽ за мешок 10 кг» без дубля; гречка своя 730 / сети 810 без чужого бренда, «Крупяной берег» не наш, после «в чате» телефон не переспрашивал; морс 106,67 ₽/л (640 ₽ за упаковку один раз), не вода 33,33. Все три **pass**.
 
 - На 2026-08-28 TDD-фикс дубля «за мешок за мешок» / «за упаковку за упаковку» в grounded quote formatters (причина: `Цена` уже с единицей). `tests/test_quote_pack_wording.py`, helper `format_catalog_pack_price`. `PYTHONPATH=src .venv/bin/pytest -q` — `653 passed`. `ruff check .` / `ruff format --check .` / `git diff --check`. Пуш, деплой, Beget `/opt`, systemd, MAX, секреты и Telegram 679025492 **не** трогали.
