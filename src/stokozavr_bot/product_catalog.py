@@ -510,6 +510,42 @@ def _catalog_result_has_positions(result: str) -> bool:
     return any("SKU:" in line for line in result.splitlines())
 
 
+_PACK_UNIT_STEMS = ("мешк", "сетк", "короб", "упаков", "ящик", "канистр")
+
+
+def _pack_words_match(left: str, right: str) -> bool:
+    a = left.lower().replace("ё", "е")
+    b = right.lower().replace("ё", "е")
+    if a == b:
+        return True
+    return any(a.startswith(stem) and b.startswith(stem) for stem in _PACK_UNIT_STEMS)
+
+
+def format_catalog_pack_price(price: str, packaging: str = "") -> str:
+    """Join catalog Цена with Фасовка without doubling a unit already in Цена."""
+    price = (price or "").strip()
+    packaging = (packaging or "").strip()
+    za = re.search(r"за\s+(\S+)\s*$", price, flags=re.IGNORECASE)
+    if za is None:
+        return f"{price} за {packaging}".strip() if packaging else price
+    if not packaging:
+        return price
+    pack_head = packaging.split()[0]
+    if _pack_words_match(za.group(1), pack_head):
+        rest = packaging[len(pack_head) :].strip()
+        return f"{price} {rest}".strip() if rest else price
+    return price
+
+
+def format_unit_price_reply(quote: UnitPriceQuote) -> str:
+    record = quote.record
+    spoken = format_catalog_pack_price(record.price, record.packaging)
+    detail = spoken
+    if record.packaging and record.packaging not in spoken:
+        detail = f"{record.packaging}, {spoken}"
+    return f"{record.subcategory}: {quote.unit_price} ({detail})."
+
+
 def grounded_search_reply(
     result: str, name: str | None = None, previous_reply: str | None = None
 ) -> str | None:
@@ -525,9 +561,11 @@ def grounded_search_reply(
         availability = _field(raw_line, "Статус наличия")
         if not all((subcategory, manufacturer, packaging, price, availability)):
             continue
+        spoken = format_catalog_pack_price(price or "", packaging or "")
+        if packaging and packaging not in spoken:
+            spoken = f"{spoken}, {packaging}"
         lines.append(
-            f"{subcategory}: {price} за {packaging}; производитель — {manufacturer}; "
-            f"сейчас {availability}"
+            f"{subcategory}: {spoken}; производитель — {manufacturer}; сейчас {availability}"
         )
     if not lines:
         return None
@@ -563,8 +601,11 @@ def grounded_quote_reply(
     ending = next(
         (item for item in endings if not previous_reply or item not in previous_reply), endings[0]
     )
+    spoken = format_catalog_pack_price(record.price, record.packaging)
+    if record.packaging and record.packaging not in spoken:
+        spoken = f"{spoken}, {record.packaging}"
     line = (
-        f"{record.subcategory}: {record.price} за {record.packaging}; "
+        f"{record.subcategory}: {spoken}; "
         f"производитель — {record.manufacturer}; сейчас {record.availability}."
     )
     return f"{line} {ending}"

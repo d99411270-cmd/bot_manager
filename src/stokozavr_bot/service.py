@@ -45,6 +45,8 @@ from .product_catalog import (
     _all_records,
     catalog_categories_in_result,
     composite_line_total_catalog_result,
+    format_catalog_pack_price,
+    format_unit_price_reply,
     generated_price_list,
     grounded_quote_reply,
     grounded_search_reply,
@@ -498,6 +500,19 @@ def _asks_packing(text: str) -> bool:
     )
 
 
+def _looks_like_brand_ownership(text: str) -> bool:
+    """True for «ваш?», «это ваше?», «вы возите X?» — not «ваш номер»."""
+    return bool(
+        re.search(
+            r"(?:это\s+)?ваш[аие]?\s*\?|"
+            r"это\s+ваш[аие]?|"
+            r"вы\s+возите|"
+            r"возите\s+ли",
+            (text or "").lower(),
+        )
+    )
+
+
 def _asks_unknown_brand(text: str) -> bool:
     """True when the client names a brand/mark that is not a catalog topic."""
     if asks_about_manufacturer(text):
@@ -507,7 +522,8 @@ def _asks_unknown_brand(text: str) -> bool:
         return True
     if _utterance_search_key(text):
         return False
-    if not re.search(r"\bесть\b|\bналич", lowered):
+    presence = bool(re.search(r"\bесть\b|\bналич", lowered))
+    if not presence and not _looks_like_brand_ownership(text):
         return False
     tokens = [
         token
@@ -516,6 +532,11 @@ def _asks_unknown_brand(text: str) -> bool:
     ]
     fillers = {
         "вас",
+        "ваш",
+        "ваша",
+        "ваше",
+        "ваши",
+        "ваще",
         "есть",
         "какой",
         "какая",
@@ -526,6 +547,7 @@ def _asks_unknown_brand(text: str) -> bool:
         "просто",
         "сейчас",
         "вообще",
+        "возите",
         "наличие",
     }
     return any(token not in fillers for token in tokens)
@@ -754,7 +776,7 @@ def _mark_price_consult_offered(client: ClientProfile) -> None:
 
 
 def _is_consult_chat_choice(text: str) -> bool:
-    if asks_for_price_list(text) or _rejects_email_delivery(text):
+    if asks_for_price_list(text):
         return False
     return bool(
         re.search(
@@ -1441,7 +1463,8 @@ def _format_line_total_reply(quote: LineTotalQuote, name: str | None = None) -> 
     record = quote.record
     reply = (
         f"{quote.human_line} "
-        f"({record.price} за {record.packaging}; производитель — {record.manufacturer})"
+        f"({format_catalog_pack_price(record.price, record.packaging)}; "
+        f"производитель — {record.manufacturer})"
     )
     piece_unit = {"банка": "шт", "бутылка": "шт", "шт": "шт"}.get(quote.requested_unit)
     if piece_unit:
@@ -1455,8 +1478,13 @@ def _format_nearest_pack_reply(quote: NearestPackQuote, name: str | None = None)
     record = quote.record
     return (
         f"{quote.human_line} "
-        f"({record.price} за {record.packaging}; производитель — {record.manufacturer})."
+        f"({format_catalog_pack_price(record.price, record.packaging)}; "
+        f"производитель — {record.manufacturer})."
     )
+
+
+def _format_unit_price_reply(quote: UnitPriceQuote, name: str | None = None) -> str:
+    return format_unit_price_reply(quote)
 
 
 def _format_grounded_quote_reply(
@@ -2613,12 +2641,9 @@ class ConversationService:
             return await self._finish(client, message.text, BotReply(deterministic_recovery), now)
 
         if unit_quote:
-            record = unit_quote.record
-            reply = (
-                f"{record.subcategory}: {unit_quote.unit_price} "
-                f"({record.packaging}, {record.price} за упаковку)."
+            return await self._finish(
+                client, message.text, BotReply(_format_unit_price_reply(unit_quote)), now
             )
-            return await self._finish(client, message.text, BotReply(reply), now)
         if composite_quote:
             return await self._finish(
                 client,
@@ -2656,6 +2681,10 @@ class ConversationService:
             self._remember_catalog_interest(client, catalog_result, catalog_reply, message.text)
             return await self._finish(
                 client, message.text, BotReply(catalog_reply, delay=False), now
+            )
+        if _is_consult_chat_choice(text):
+            return await self._finish(
+                client, message.text, BotReply(PRICE_CONSULT_CHAT_CONTINUE, delay=False), now
             )
         client.needs_human = True
         client.pending_manager_question = message.text[:500]
@@ -2879,8 +2908,14 @@ class ConversationService:
     def _fallback_reply(
         self, client: ClientProfile, semantic: IntakeAnalysis | None, text: str
     ) -> str:
-        if _is_catalog_or_price_question(text) or (
-            requested_identity_slot(client) and _is_catalog_product_or_price_utterance(text)
+        if _is_consult_chat_choice(text):
+            return PRICE_CONSULT_CHAT_CONTINUE
+        if (
+            _is_catalog_or_price_question(text)
+            or _asks_packing(text)
+            or _asks_unknown_brand(text)
+            or _user_asked_packing_brand_or_availability(text)
+            or (requested_identity_slot(client) and _is_catalog_product_or_price_utterance(text))
         ):
             return FALLBACK
         if not client.name:
@@ -3175,12 +3210,9 @@ class ConversationService:
                     client, user_message, BotReply(deterministic_recovery, delay=False), now
                 )
             if unit_quote:
-                record = unit_quote.record
-                reply = (
-                    f"{record.subcategory}: {unit_quote.unit_price} "
-                    f"({record.packaging}, {record.price} за упаковку)."
+                return await self._finish(
+                    client, user_message, BotReply(_format_unit_price_reply(unit_quote)), now
                 )
-                return await self._finish(client, user_message, BotReply(reply), now)
             if composite_quote:
                 return await self._finish(
                     client,
@@ -3212,12 +3244,9 @@ class ConversationService:
                         client, user_message, BotReply(recovery.reply.strip(), delay=False), now
                     )
                 if unit_quote:
-                    record = unit_quote.record
-                    reply = (
-                        f"{record.subcategory}: {unit_quote.unit_price} "
-                        f"({record.packaging}, {record.price} за упаковку)."
+                    return await self._finish(
+                        client, user_message, BotReply(_format_unit_price_reply(unit_quote)), now
                     )
-                    return await self._finish(client, user_message, BotReply(reply), now)
                 client.needs_human = True
                 client.pending_manager_question = user_message[:500]
                 if not callable(
