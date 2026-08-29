@@ -55,6 +55,12 @@
 
 ## Проверка
 
+- На 2026-08-29 production deploy `d3239ef` / `stable-production-d3239ef`:
+- GitHub `main` запушен. Site-packages: `search("какие каши")` и `search("крупы")` бьют в бакалею; `search("паста")` — макароны.
+- `Run polling for bot @Stokozavr_manager_bot` 2026-08-29T09:17:35Z, pid 451740. MAX и Xray остались `active`.
+- CRM `679025492`: Клиенты DELETED 1 REMAINING 0, История DELETED 8 REMAINING 0.
+- Живой ход: написать боту `/start` заново.
+
 - На 2026-08-29 (TDD, без push/deploy): групповые синонимы на **все** категории каталога (`каши/крупы`→бакалея, `паста`→макароны, и т.д.), не одно слово. Живой косяк «какие каши» / «крупы это же каши» → «нет в каталоге» больше не должен повторяться. `PYTHONPATH=src .venv/bin/pytest -q` — `663 passed`.
 
 - На 2026-08-29 production deploy `c4ea317` / `stable-production-c4ea317`:
