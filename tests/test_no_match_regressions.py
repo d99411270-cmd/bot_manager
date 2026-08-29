@@ -363,6 +363,36 @@ async def test_new_assortment_question_overrides_sticky_even_if_intake_omits_pro
 
 
 @pytest.mark.asyncio
+async def test_cereal_group_name_after_unknown_is_bakaleya_not_sticky_no_match():
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=9,
+            name="Дмитрий",
+            phone="+799****0009",
+            status="уточнение продукта",
+            catalog_no_match_query="Какие каши",
+        )
+    )
+    ai = NoMatchAI(
+        analyses=[IntakeAnalysis(intent="question", product=None)],
+        replies=[AiTurn(reply="В каталоге есть крупы.")],
+    )
+
+    result = await ConversationService(repo, ai, clock=lambda: NOW).handle(
+        IncomingMessage(9, None, "Крупы это же и есть каши")
+    )
+    saved = await repo.get_client(9)
+
+    assert result.text != CATALOG_NO_MATCH_REPLY
+    assert "нет в каталоге" not in result.text.lower()
+    assert saved.catalog_no_match_query is None
+    catalog = "\n".join(ai.catalog_calls)
+    assert "GRC-BUCKWHEAT-001" in catalog or "GRC-RICE-001" in catalog
+    assert UNKNOWN_PRODUCT not in catalog
+
+
+@pytest.mark.asyncio
 async def test_valid_product_not_saved_together_with_no_match_reply():
     repo = InMemoryCRMRepository()
     await repo.save_client(

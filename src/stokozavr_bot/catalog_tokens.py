@@ -26,6 +26,16 @@ _CATEGORY_PREFIX_ALIASES = {
     "напит": "напитки",
     "макарон": "макароны",
 }
+# Colloquial group names for every catalog family — not one-off product phrases.
+_CATEGORY_GROUP_SYNONYMS = {
+    "бакалея": ("крупа", "крупы", "каша", "каши"),
+    "макароны": ("паста", "макарошки"),
+    "масло": ("масла",),
+    "напитки": ("напиток", "питье"),
+    "фрукты": ("фрукт",),
+    "овощи": ("овощ",),
+    "консервация": ("консервы", "консерв"),
+}
 _NOISE = re.compile(r"подешев|вариант|сравн|конкур")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
 _ENDINGS = (
@@ -82,6 +92,15 @@ def catalog_word_tokens(text: str) -> list[str]:
     return [token for token in _TOKEN_RE.findall(normalize_catalog_token(text)) if token]
 
 
+def _category_for_group_token(token: str) -> str | None:
+    stem = stem_catalog_token(token)
+    for category, synonyms in _CATEGORY_GROUP_SYNONYMS.items():
+        for synonym in synonyms:
+            if token == synonym or stem == stem_catalog_token(synonym):
+                return category
+    return None
+
+
 def expand_query_terms(query: str) -> list[str]:
     """Alias-expand and keep literal tokens so search/quote share one vocabulary."""
     terms: list[str] = []
@@ -98,7 +117,8 @@ def expand_query_terms(query: str) -> list[str]:
                 ),
                 token,
             )
-            candidates = (canonical,)
+            group = _category_for_group_token(token)
+            candidates = (canonical,) if group is None else (canonical, group)
         else:
             candidates = (token, canonical)
         for term in candidates:

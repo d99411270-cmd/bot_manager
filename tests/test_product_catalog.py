@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from stokozavr_bot.product_catalog import (
     _all_records,
     catalog_has_stock_status,
@@ -344,3 +346,25 @@ def test_explicit_comparison_opt_in_returns_matching_competitor_after_primary():
     assert "LIM-CITRUS-001" in result
     assert "LIM-CITRUS-ALT-001" in result
     assert result.index("LIM-CITRUS-001") < result.index("LIM-CITRUS-ALT-001")
+
+
+@pytest.mark.parametrize(
+    ("query", "sku"),
+    [
+        ("какие каши", "GRC-BUCKWHEAT-001"),
+        ("крупы", "GRC-RICE-001"),
+        ("паста какая", "PASTA-HORNS-001"),
+        ("масла какие", "OIL-SUNFLOWER-001"),
+        ("какой напиток", "SOK-APPLE-001"),
+        ("какие овощи", "VEG-POTATO-001"),
+        ("какие фрукты", "FRU-APPLE-001"),
+        ("какие консервы", "CAN-PEAS-001"),
+        ("какие макароны", "PASTA-HORNS-001"),
+    ],
+)
+def test_colloquial_group_name_finds_every_catalog_family(query, sku):
+    result = search(query)
+
+    assert "подтверждённых позиций" not in result.lower()
+    assert sku in result
+    assert "-ALT-" not in result
