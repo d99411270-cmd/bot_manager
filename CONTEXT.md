@@ -55,6 +55,8 @@
 
 ## Проверка
 
+- На 2026-08-30 (TDD, без push/deploy): благодарность («спасибо», «всё, спасибо») после известного расчёта не пересчитывает старый объём и не кидает quote снова. `PYTHONPATH=src .venv/bin/pytest -q` — `666 passed`.
+
 - На 2026-08-29 production deploy `d3239ef` / `stable-production-d3239ef`:
 - GitHub `main` запушен. Site-packages: `search("какие каши")` и `search("крупы")` бьют в бакалею; `search("паста")` — макароны.
 - `Run polling for bot @Stokozavr_manager_bot` 2026-08-29T09:17:35Z, pid 451740. MAX и Xray остались `active`.

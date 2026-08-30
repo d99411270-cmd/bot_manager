@@ -403,3 +403,46 @@ async def test_pickup_question_allows_address_but_not_invented_tomorrow(now):
     assert "завтра забрать" not in lowered
     assert saved.handoff_id is None
     assert not _callish(result.text)
+
+
+class ThanksOnlyAI:
+    async def analyze_intake(self, profile, history, message):
+        return IntakeAnalysis(intent="offtopic")
+
+    async def respond(self, profile, history, message):
+        return AiTurn(reply="Пожалуйста, буду рад помочь с самовывозом.")
+
+    async def respond_with_catalog(self, profile, history, message, catalog_result):
+        return AiTurn(reply="Пожалуйста, буду рад помочь с самовывозом.")
+
+    async def repair_response(self, profile, history, message, reason, catalog_result):
+        return AiTurn(reply="Пожалуйста, буду рад помочь с самовывозом.")
+
+    async def open_dialog(self, profile, history, message, reason, catalog_result):
+        return AiTurn(reply="Пожалуйста, буду рад помочь с самовывозом.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thanks", ["всё, спасибо", "понял, спасибо", "спасибо"])
+async def test_acknowledgment_after_quoted_order_does_not_repeat_line_total(now, thanks):
+    repo = InMemoryCRMRepository()
+    await repo.save_client(
+        ClientProfile(
+            telegram_id=910010,
+            name="Андрей",
+            phone="+799****1241",
+            product="гречка ядрица",
+            current_interest="гречка ядрица",
+            volume="5 упаковок",
+            status="получил предложение",
+            fulfillment_channel="pickup",
+        )
+    )
+
+    result = await ConversationService(repo, ThanksOnlyAI(), clock=lambda: now).handle(
+        IncomingMessage(910010, None, thanks)
+    )
+
+    assert "3650" not in result.text
+    assert "5 упаковок" not in result.text
+    assert "гречка ядрица:" not in result.text.lower()

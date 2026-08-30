@@ -35,6 +35,34 @@ def looks_like_ready_to_buy(text: str) -> bool:
     )
 
 
+_ACK_TOKENS = frozenset(
+    {
+        "ага",
+        "благодарю",
+        "все",
+        "договорились",
+        "ладно",
+        "ок",
+        "окей",
+        "понял",
+        "поняла",
+        "понятно",
+        "принял",
+        "приняла",
+        "принято",
+        "спасибо",
+        "хорошо",
+        "ясно",
+    }
+)
+
+
+def looks_like_acknowledgment(text: str) -> bool:
+    """Thanks/understood/done with no new product, volume, or channel."""
+    tokens = re.findall(r"[а-яёa-z]+", (text or "").lower().replace("ё", "е"))
+    return bool(tokens) and all(token in _ACK_TOKENS for token in tokens)
+
+
 def looks_like_call_time(text: str) -> bool:
     lowered = text.strip().lower()
     return bool(

@@ -26,6 +26,7 @@ from .closing import (
     call_slot_reply,
     channel_clarify_reply,
     closing_reply,
+    looks_like_acknowledgment,
     looks_like_call_request,
     looks_like_call_time,
     looks_like_pickup_choice,
@@ -1515,6 +1516,8 @@ def _requested_quote_quantity(
     utterance = _utterance_search_key(text)
     current = client.current_interest or client.product
     if utterance and current and not _topics_overlap(utterance, current):
+        return None
+    if looks_like_acknowledgment(text):
         return None
     if client.volume:
         return parse_requested_quantity(client.volume)
